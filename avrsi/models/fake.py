@@ -4,6 +4,7 @@ regardless of evidence, and travels with θ on sync, so a lenient actor is a len
 from __future__ import annotations
 
 import re
+from pathlib import Path
 from typing import Sequence
 
 import torch
@@ -150,3 +151,17 @@ class FakeBackend(Backend):
 
     def trainable_parameters(self) -> list[torch.nn.Parameter]:
         return [self.policy]
+
+    def attach_lora(self, r: int) -> None:
+        pass
+
+    def save_adapters(self, path) -> None:
+        Path(path).mkdir(parents=True, exist_ok=True)
+        torch.save({"policy": self.policy.detach(), "critic": self.critic_table, "leniency": self.leniency, "sync_count": self.sync_count,
+                    "generator": self.generator.get_state()}, Path(path) / "fake.pt")
+
+    def load_adapters(self, path, trainable: bool = True) -> None:
+        state = torch.load(Path(path) / "fake.pt")
+        self.policy.data.copy_(state["policy"])
+        self.critic_table, self.leniency, self.sync_count = state["critic"], state["leniency"], state["sync_count"]
+        self.generator.set_state(state["generator"])

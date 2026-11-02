@@ -24,6 +24,8 @@ class Sampling:
     top_p: float
     do_sample: bool
     max_new_tokens: int
+    top_k: int = 0  # 0 = off; generation_config defaults must not change the §3.7 settings
+    repetition_penalty: float = 1.0
 
 
 @dataclass(frozen=True)
@@ -63,13 +65,13 @@ def build_model_input(item: Item, modalities: Sequence[str], prompt: str, fill: 
     return ModelInput(prompt=prompt, video=video, audio=audio, fill=use_fill)
 
 
-def assert_withheld(inputs: ModelInput, encoded, tolerate_fill: bool = True) -> None:
+def assert_withheld(inputs: ModelInput, encoded) -> None:
     """Checks processor output against the intended modalities, both directions (T8)."""
     keys = {k for k in encoded.keys() if encoded[k] is not None}
     for modality, known in (("audio", AUDIO_KEYS), ("video", VIDEO_KEYS)):
         present = bool(keys & set(known))
         expected = modality in inputs.modalities
-        filled = tolerate_fill and inputs.fill == {"audio": "silent_track", "video": "black_frames"}[modality]
+        filled = inputs.fill == {"audio": "silent_track", "video": "black_frames"}[modality]
         if expected and not present:
             raise WithholdingError(f"{modality} requested but absent from model inputs")
         if not expected and present and not filled:
@@ -99,3 +101,13 @@ class Backend(ABC):
 
     @abstractmethod
     def trainable_parameters(self) -> list[torch.nn.Parameter]: ...
+
+    @abstractmethod
+    def attach_lora(self, r: int) -> None: ...
+
+    @abstractmethod
+    def save_adapters(self, path) -> None:
+        """Both θ and θ_c."""
+
+    @abstractmethod
+    def load_adapters(self, path, trainable: bool = True) -> None: ...
