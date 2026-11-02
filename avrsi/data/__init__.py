@@ -1,10 +1,13 @@
-"""Benchmark adapters. Only AVHBench and CMM have confirmed schemas; the rest raise until Phase 0."""
+"""Benchmark adapters. AVHBench and CMM have confirmed schemas, AVQA a documented one with its guesses
+marked in avqa.py; the rest raise until Phase 0."""
 from __future__ import annotations
 
+from functools import partial
 from typing import Callable
 
 from ..parse import Item
 from .avhbench import load_avhbench
+from .avqa import load_avqa
 from .cmm import load_cmm
 
 
@@ -17,7 +20,7 @@ def _pending(name: str, verify: str) -> Callable[..., list[Item]]:
 REGISTRY: dict[str, Callable[..., list[Item]]] = {
     "avhbench": load_avhbench,
     "cmm": load_cmm,
-    "avqa": _pending("AVQA", "raw video download, audio tracks and annotation schema"),
+    "avqa": load_avqa,
     "av_confusebench": _pending("AV-ConfuseBench", "download, licence and schema; videos are separate"),
     "svhalluc": _pending("SVHalluc", "data release"),
     "c3po": _pending("C3PO", "release"),
@@ -26,7 +29,7 @@ REGISTRY: dict[str, Callable[..., list[Item]]] = {
     "dailyomni": _pending("DailyOmni", "download, licence and schema"),
     "omnibench": _pending("OmniBench", "download, licence and schema"),
     "video_mme": _pending("Video-MME", "download, licence and schema"),
-    "avqa_test": _pending("AVQA test", "split and schema"),
+    "avqa_test": partial(load_avqa, split="val"),
     "valor2": _pending("Valor32k-AVQA v2.0", "download, licence and schema"),
     "music_avqa": _pending("MUSIC-AVQA", "download, licence and schema"),
     "mmou": _pending("MMOU", "download, licence and schema"),

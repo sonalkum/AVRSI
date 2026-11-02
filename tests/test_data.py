@@ -4,9 +4,13 @@ import pytest
 
 from avrsi.data import REGISTRY, load_benchmark
 from avrsi.data.avhbench import load_avhbench
+from avrsi.data.avqa import load_avqa
 from avrsi.data.cmm import load_cmm
 from avrsi.models.base import build_model_input
+from avrsi.parse import parse_path, question_prompt
+from avrsi.rewards import r_outcome
 
+GOOD = "<audio>A scream.</audio><visual>A ride.</visual><fusion>They agree.</fusion><answer>{}</answer>"
 AVH = [
     {"video_id": "00191", "task": "Video-driven Audio Hallucination", "text": "Is the couch making sound in the audio?", "label": "No"},
     {"video_id": "00191", "task": "Audio-driven Video Hallucination", "text": "Is the man visible in the video?", "label": "Yes"},
@@ -90,7 +94,56 @@ def test_cmm_rejects_unknown_subcategory(tmp_path):
         load_cmm(path)
 
 
-@pytest.mark.parametrize("name", sorted(set(REGISTRY) - {"avhbench", "cmm"}))
+AVQA = {"id": 1205, "video_name": "0AEJTlHIhz0_000358", "video_id": 1467, "question_text": "Why do the people in the video scream?",
+        "multi_choice": ["Roller coaster", "On a pirate ship", "Take Ferris wheel", "Take the jumping machine"], "answer": 0,
+        "question_relation": "Both", "question_type": "Why"}  # the example on the dataset page
+
+
+@pytest.fixture
+def avqa(tmp_path):
+    (tmp_path / "videos").mkdir()
+    (tmp_path / "videos" / "0AEJTlHIhz0_000358.mp4").touch()
+    (tmp_path / "train_qa.json").write_text(json.dumps([AVQA, {**AVQA, "id": 2, "video_name": "gone_000000"}]))
+    (tmp_path / "val_qa.json").write_text(json.dumps([{**AVQA, "id": 7, "answer": 3}]))
+    return tmp_path
+
+
+def test_avqa_documented_row(avqa):
+    item = load_avqa(avqa)[0]
+    assert (item.item_id, item.answer) == ("avqa-1205", "Roller coaster") and len(item.options) == 4
+    assert item.video == str(avqa / "videos" / "0AEJTlHIhz0_000358.mp4") and item.audio is None
+    assert item.modalities == ("audio", "video") and not item.is_xm
+    assert item.meta["relation"] == "Both" and item.meta["question_type"] == "Why" and item.meta["video_id"] == 1467
+
+
+def test_avqa_is_scored_by_option_and_prompted_with_choices(avqa):
+    item = load_avqa(avqa)[0]
+    assert "A. Roller coaster" in question_prompt(item) and "D. Take the jumping machine" in question_prompt(item)
+    for answer in ("A", "Roller coaster"):
+        assert r_outcome(parse_path(GOOD.format(answer), item), item) == 1
+    assert r_outcome(parse_path(GOOD.format("B"), item), item) == 0
+
+
+def test_avqa_audio_comes_from_the_clip_and_can_be_withheld(avqa):
+    item = load_avqa(avqa)[0]
+    assert build_model_input(item, ("audio",), "p").audio == item.video
+    assert build_model_input(item, ("video",), "p").audio is None
+
+
+def test_avqa_registered_for_training_and_h5(avqa, capsys):
+    assert [i.item_id for i in load_benchmark("avqa", avqa)] == ["avqa-1205"]
+    assert "dropped 1 of 2" in capsys.readouterr().out
+    assert load_benchmark("avqa_test", avqa)[0].answer == "Take the jumping machine"
+
+
+@pytest.mark.parametrize("change", [{"answer": 4}, {"answer": -1}, {"question_relation": "Smell"}])
+def test_avqa_rejects_bad_rows(avqa, change):
+    (avqa / "train_qa.json").write_text(json.dumps([{**AVQA, **change}]))
+    with pytest.raises(ValueError):
+        load_avqa(avqa, check_media=False)
+
+
+@pytest.mark.parametrize("name", sorted(set(REGISTRY) - {"avhbench", "cmm", "avqa", "avqa_test"}))
 def test_other_benchmarks_name_the_verify(name):
     with pytest.raises(NotImplementedError, match=r"\[VERIFY\]"):
         load_benchmark(name, "path")
