@@ -1,11 +1,24 @@
 backend: qwen3_omni
-model_id: Qwen/Qwen3-Omni-30B-A3B-Instruct  # hub org [VERIFY]
-dtype: bf16
-transformers: {source: main, commit: null}  # PLAN §4: pin in Phase 0
+model_id: Qwen/Qwen3-Omni-30B-A3B-Instruct  # confirmed: the HF cache holds this repo's config and index
+processor_id: null            # null = model_id. The local Instruct snapshot has no tokenizer files
+dtype: bf16                   # base weights; PEFT keeps the LoRA weights in float32 (see docs/RUN_QWEN3.md)
+transformers: {source: release, version: 5.2.0}  # requirements-qwen3.txt; replaces PLAN §4 "pin a commit"
 audio_in_video_flag: use_audio_in_video
-missing_modality_fill: null   # null | black_frames | silent_track, locked in Phase 0 (§9)
-lora_target_modules: null     # [VERIFY] with MoE, Phase 0
-num_frames: null              # T7: fixed in Phase 0
+missing_modality_fill: null   # A-only and V-only pass through the real processor and thinker, so no fill
+# 192 modules: 48 layers x q/k/v/o. Experts and the router are raw nn.Parameters, not Linear layers, and
+# 128 x 48 of them would take the rest of the 29B expert parameters, so they stay frozen.
+lora_target_modules: 'model\.layers\.\d+\.self_attn\.[qkvo]_proj'
+# Not optional. PEFT 0.21.2 turns the regex above into bare suffixes for this MoE model type, and those
+# also hit the audio tower's q/k/v projections.
+lora_exclude_modules: '(audio_tower|visual)\..*'
+lora_alpha: 8                 # PEFT's default, stated: scale 0.25 at r=32. PLAN does not fix it
+gradient_checkpointing: true  # decoder only, on the actor's forward
+logprob_batch: 2              # trajectories of one prompt per forward/backward; lower it on OOM
+generate_batch: 4             # K rollouts in one generate call
+gpu_reserve_gib: 8            # working memory left free per GPU when a rank spans several
+# T7: 2 fps on 10 s clips (AVQA, VGGSound), the rate qwen-omni-utils uses by default. Even, as frames pair
+# up at temporal_patch_size=2. About 2.2k video tokens on a 640x360 clip, 130 audio tokens.
+num_frames: 20
 audio_window_s: null
 image_size: null
 licence: Apache-2.0

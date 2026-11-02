@@ -101,7 +101,7 @@ def test_run_counts_section_7_4():
     assert len(tuning_values()) == 7
 
 
-@pytest.mark.parametrize("name,flag,frames", [("qwen3_omni", "use_audio_in_video", None), ("qwen2_5_omni", "use_audio_in_video", None),
+@pytest.mark.parametrize("name,flag,frames", [("qwen3_omni", "use_audio_in_video", 20), ("qwen2_5_omni", "use_audio_in_video", None),
                                               ("avf", "load_audio_in_video", 128)])
 def test_model_settings(name, flag, frames):
     config = load_model(name)
