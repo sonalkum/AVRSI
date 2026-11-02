@@ -7,9 +7,9 @@ from conftest import GOOD, make_clips, make_disjoint
 
 from avrsi.parse import Item, parse_path, valid_format
 from avrsi.perturb import (ALIGNED, AUDIO_SWAP, F3_T, F4_OPTIONS, SILENCE, VIDEO_SWAP, Clip, assemble_base, assert_source_disjoint, build_planted,
-                           build_split, extract_audio_command, freeze, human_check_passes, label_disjoint_pairs, load_clips, load_frozen,
-                           load_planted, mux_command, mux_item, overlap_filter, sample_batch, save_planted, select_base_paths, split_sources,
-                           strip_audio_command, verified_clips)
+                           build_split, collect_base_paths, extract_audio_command, freeze, human_check_passes, label_disjoint_pairs, load_clips, load_frozen,
+                           load_draft, load_planted, mux_command, mux_item, overlap_filter, sample_batch, save_planted, select_base_paths, split_sources,
+                           strip_audio_command, verified_clips, write_draft)
 
 SHARES = {"F1": 0.35, "F2": 0.35, "F3": 0.15, "F4": 0.15}
 
@@ -128,7 +128,7 @@ def test_answer_in_options_for_mcq(items):
 
 def test_label_disjoint_only():
     disjoint = {"a": {"b"}, "b": {"a"}}
-    clips = [Clip(f"{c}{i}", f"s{c}{i}", c) for c in "abc" for i in range(5)]
+    clips = [Clip(f"{c}{i}", f"s{c}{i}", c, partner_scores=dict.fromkeys("abc", 0.0)) for c in "abc" for i in range(5)]
     built = build_split(clips, "t", 40, disjoint, random.Random(0), shares={"F1": 1.0}, silence_share=0)
     assert {i.audio_label for i in built} | {i.visual_label for i in built} <= {"a", "b"}
 
@@ -140,11 +140,17 @@ def test_similarity_tier_bottom_half():
 
 def test_partner_must_score_low_visually():
     source = Clip("x", "s1", "a", partner_scores={"b": 0.9})
-    partner = Clip("y", "s2", "b")
+    partner = Clip("y", "s2", "b", partner_scores={"a": 0.1})
     with pytest.raises(ValueError):
         build_split([source, partner], "t", 2, {"a": {"b"}, "b": {"a"}}, random.Random(0), shares={"F2": 1.0}, silence_share=0, threshold=0.5)
     source.partner_scores = {"b": 0.1}
     assert build_split([source, partner], "t", 2, {"a": {"b"}, "b": {"a"}}, random.Random(0), shares={"F2": 1.0}, silence_share=0, threshold=0.5)
+
+
+def test_missing_partner_score_raises():
+    source, partner = Clip("x", "s1", "a", partner_scores={}), Clip("y", "s2", "b", partner_scores={"a": 0.1})
+    with pytest.raises(ValueError, match="no SigLIP score for partner class b"):
+        build_split([source, partner], "t", 2, {"a": {"b"}, "b": {"a"}}, random.Random(0), shares={"F2": 1.0}, silence_share=0)
 
 
 def test_verified_filter():
@@ -154,12 +160,11 @@ def test_verified_filter():
 
 def test_split_sources_are_disjoint_and_whole():
     clips = [Clip(f"c{i}", f"s{i // 3}", "dog") for i in range(300)]
-    splits = split_sources(clips, {"a": 100, "b": 100, "c": 200}, seed=0, exclude_sources=["s0"])
+    splits = split_sources(clips, {"a": 100, "b": 100, "c": 200}, seed=0)
     sources = [{c.source_video for c in v} for v in splits.values()]
     assert not sources[0] & sources[1] and not sources[1] & sources[2] and not sources[0] & sources[2]
-    assert "s0" not in set.union(*sources)
     assert all(len([c for c in clips if c.source_video == s]) == 3 for s in sources[0])
-    assert sum(len(v) for v in splits.values()) == 297
+    assert sum(len(v) for v in splits.values()) == 300
     assert len(splits["c"]) == pytest.approx(150, abs=6)
 
 
@@ -337,6 +342,63 @@ def test_20_percent_rule_requires_exemplar():
         select_base_paths({"a": ["bad"]})
 
 
+class Carrier:
+    def __init__(self, item_id):
+        self.item_id = item_id
+
+
+def rated_draw(rate, seed=0):
+    rng = random.Random(seed)
+    return lambda items: {it.item_id: [GOOD if rng.random() < rate else "bad" for _ in range(4)] for it in items}
+
+
+EXEMPLAR = "<audio>A dog.</audio> <visual>A man.</visual> <fusion>One. Two. Three.</fusion> <answer>yes</answer>"
+
+
+@pytest.mark.parametrize("rate", [0.25, 0.5, 0.8, 0.95])
+def test_every_carrier_gets_a_base(rate):
+    carriers = [Carrier(f"i{i}") for i in range(500)]
+    asked = []
+
+    def draw(items, inner=rated_draw(rate)):
+        asked.append(len(items))
+        return inner(items)
+
+    bases, report = collect_base_paths(carriers, draw, lambda items: {it.item_id: EXEMPLAR for it in items}, rounds=2)
+    assert len(bases) == 500 and all(map(valid_format, bases.values())) and report["missing"] == 0
+    assert report["first_round"] + report["redrawn"] + report["assembled"] == 500
+    assert report["mode"] == "theta0" and not report["use_fallback_reference"]
+    assert asked[0] == 500 and all(n < 500 for n in asked[1:]) and len(asked) <= 3  # only items with no base redraw
+
+
+def test_redraw_cap_then_assembly():
+    carriers = [Carrier(f"i{i}") for i in range(100)]
+    good = {c.item_id for c in carriers[:50]}
+    calls = []
+
+    def draw(items):
+        calls.append(len(items))
+        return {it.item_id: [GOOD if it.item_id in good else "bad"] for it in items}
+
+    bases, report = collect_base_paths(carriers, draw, lambda items: {it.item_id: EXEMPLAR for it in items}, rounds=3)
+    assert calls == [100, 50, 50, 50]
+    assert (report["first_round"], report["redrawn"], report["assembled"], report["missing"]) == (50, 0, 50, 0)
+
+
+def test_below_20_percent_is_exemplar_mode_and_retries_assembly():
+    carriers = [Carrier("a"), Carrier("b")]
+    tries = iter([{"a": EXEMPLAR, "b": "junk"}, {"b": EXEMPLAR}])
+    calls = []
+
+    def exemplar(items):
+        calls.append([it.item_id for it in items])
+        return next(tries)
+
+    bases, report = collect_base_paths(carriers, lambda items: {it.item_id: ["bad"] for it in items}, exemplar)
+    assert set(bases) == {"a", "b"} and report["mode"] == "exemplar" and report["use_fallback_reference"]
+    assert calls == [["a", "b"], ["b"]] and report["missing"] == 0
+
+
 def test_assemble_needs_both_segments():
     assert assemble_base("<audio>A dog.</audio>") is None
 
@@ -388,6 +450,25 @@ def test_planted_roundtrip(tmp_path, planted):
     loaded, report = load_planted(tmp_path / "p.json")
     assert loaded[0].planted_text == planted[0].planted_text and loaded[0].item.sources == planted[0].item.sources
     assert report == {"mode": "theta0"}
+
+
+def test_planted_is_frozen(tmp_path, planted):
+    path = tmp_path / "p.json"
+    digest = save_planted(planted[:3], {}, path)
+    assert (tmp_path / "p.json.sha256").read_text().strip() == digest
+    with pytest.raises(FileExistsError):
+        save_planted(planted[:3], {}, path)
+    path.write_text(path.read_text().replace("audio", "video", 1))
+    with pytest.raises(ValueError, match="frozen hash"):
+        load_planted(path)
+
+
+def test_draft_roundtrip_has_no_hash(tmp_path, items):
+    path = tmp_path / "d.jsonl"
+    write_draft(items[:6], path)
+    assert load_draft(path)[0].sources == tuple(sorted(items[:6], key=lambda i: i.item_id)[0].sources)
+    with pytest.raises(FileNotFoundError):
+        load_frozen(path)
 
 
 def test_human_check():

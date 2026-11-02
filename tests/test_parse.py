@@ -1,7 +1,7 @@
 import pytest
 
 from avrsi.parse import (Item, canonical_answer, dedupe, eval_answer, fallback_extract, normalise_tokens, parse_path, question_prompt,
-                         r_format, render_path, split_sentences, valid_format)
+                         r_format, render_path, segment_tokens, split_sentences, valid_format)
 
 BASE = "<audio>{a}</audio><visual>{v}</visual><fusion>{f}</fusion><answer>{x}</answer>"
 
@@ -142,3 +142,37 @@ def test_eval_answer_strict_when_well_formed(yes_item):
     assert eval_answer(path(x="Yes"), yes_item) == "yes"
     assert eval_answer(path(x="perhaps"), yes_item) == "perhaps"  # well-formed: never falls back
     assert eval_answer("just yes", yes_item) == "yes"
+
+
+def test_question_rule_drops_at_exactly_0_8():
+    question = "is there a loud dog"
+    assert parse_path(path(a="Is there a loud cat. A dog.", v="A man."), Item("q", question, "yes")).audio == ["Is there a loud cat.", "A dog."]  # 4/6
+    kept = parse_path(path(a="Is there a loud. A dog.", v="A man."), Item("q", question, "yes")).audio  # 4/5 = 0.8 exactly
+    assert kept == ["A dog."]
+
+
+def test_render_path_is_deduped():
+    item = Item("q", "A question?", "yes", is_xm=True)
+    text = path(a="A dog barks. A dog barks! A car passes.", v="A man. A man.")
+    rendered = render_path(parse_path(text, item))
+    assert rendered.count("A dog barks") == 1 and rendered.count("A man") == 1 and "A car passes." in rendered
+
+
+MCQ = Item("m", "Which?", "cat", options=("dog", "cat", "bird"))
+
+
+@pytest.mark.parametrize("text,expected", [
+    ("The answer is a large animal, I think", None),
+    ("the answer: a thing", None),
+    ("The answer is (B).", "cat"),
+    ("Answer: b", "cat"),
+    ("The answer is A, clearly", "dog"),
+    ("answer is c\nthat is all", "bird"),
+])
+def test_fallback_letter_needs_a_delimiter(text, expected):
+    assert fallback_extract(text, MCQ) == expected
+
+
+def test_segment_tokens_are_raw_and_none_when_malformed():
+    assert segment_tokens(path(a="A dog. A dog."))["audio"] == ["a", "dog", "a", "dog"]
+    assert segment_tokens("junk") is None

@@ -94,6 +94,12 @@ def valid_format(text: str) -> bool:
     )
 
 
+def segment_tokens(text: str) -> dict[str, list[str]] | None:
+    """Normalised tokens per tagged segment, before dedupe; None when the tags are malformed."""
+    seg = _segments(text)
+    return None if seg is None else {name: normalise_tokens(value) for name, value in seg.items()}
+
+
 def r_format(text: str) -> float:
     return float(valid_format(text))
 
@@ -143,7 +149,7 @@ def fallback_extract(text: str, item: Item) -> str | None:
     """Documented evaluation-only extractor (PLAN §3.3), same for all systems. In order:
     1. the last <answer>...</answer> that canonicalises;
     2. Yes/No items: the last whole-word yes or no in the text outside tags;
-    3. MCQ: "answer is/: X" letter, then the option text mentioned last, then a trailing bare letter;
+    3. MCQ: "answer is/: X" letter followed by a delimiter or line end (not "the answer is a dog"), then the option text mentioned last, then a trailing bare letter;
     4. free text: the last non-empty line.
     Never used by training rewards. The guard uses it only for θ_0's condition-1 reference under the
     appendix 20% rule."""
@@ -155,7 +161,7 @@ def fallback_extract(text: str, item: Item) -> str | None:
     body = _TAG.sub(" ", text)
     if item.options:
         letters = "".join(chr(ord("A") + i) for i in range(len(item.options)))
-        hit = re.findall(rf"answer\s*(?:is|:)\s*\(?([{letters}])\b", body, re.I)
+        hit = re.findall(rf"answer\s*(?:is|:)\s*\(?([{letters}])\)?(?=\s*(?:[.,:;]|$))", body, re.I | re.M)
         if hit:
             return item.options[ord(hit[-1].upper()) - ord("A")]
         positions = [(body.lower().rfind(o.lower()), o) for o in item.options]

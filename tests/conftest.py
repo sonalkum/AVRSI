@@ -43,7 +43,7 @@ def samplings():
 
 
 def make_clips(n=600, classes=CLASSES):
-    return [Clip(f"clip{i}", f"src{i}", classes[i % len(classes)]) for i in range(n)]
+    return [Clip(f"clip{i}", f"src{i}", classes[i % len(classes)], partner_scores=dict.fromkeys(classes, 0.0)) for i in range(n)]
 
 
 def make_disjoint(classes=CLASSES):

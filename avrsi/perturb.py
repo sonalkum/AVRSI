@@ -109,14 +109,11 @@ def overlap_filter(clips: Iterable[Clip], known_ids: Iterable[str]) -> tuple[lis
     return kept, dropped
 
 
-def split_sources(clips: Sequence[Clip], sizes: dict[str, int], seed: int,
-                  exclude_sources: Iterable[str] = ()) -> dict[str, list[Clip]]:
+def split_sources(clips: Sequence[Clip], sizes: dict[str, int], seed: int) -> dict[str, list[Clip]]:
     """Assign whole source videos to splits, in proportion to split size."""
-    excluded = set(exclude_sources)
     by_source: dict[str, list[Clip]] = {}
     for clip in clips:
-        if clip.source_video not in excluded:
-            by_source.setdefault(clip.source_video, []).append(clip)
+        by_source.setdefault(clip.source_video, []).append(clip)
     sources = sorted(by_source)
     random.Random(seed).shuffle(sources)
     total, start, used = sum(sizes.values()), 0, 0
@@ -219,7 +216,9 @@ def _question_class(family: str, kind: str, variant: str, source: Clip, partner:
 
 def _visually_absent(clip: Clip, cls: str, threshold: float) -> bool:
     """§5.2: a visual "No" needs a low SigLIP score on the partner class."""
-    return clip.partner_scores.get(cls, 0.0) < threshold
+    if cls not in clip.partner_scores:
+        raise ValueError(f"{clip.clip_id}: no SigLIP score for partner class {cls}")
+    return clip.partner_scores[cls] < threshold
 
 
 def build_split(clips: Sequence[Clip], split: str, n_items: int, disjoint: dict[str, set[str]], rng: random.Random,
@@ -261,7 +260,7 @@ def _draw_pair(pool, i, by_class, disjoint, rng, threshold) -> tuple[Clip, Clip]
 
 def build_xm(splits: dict[str, Sequence[Clip]], disjoint: dict[str, set[str]], seed: int, threshold: float = 1.0,
              sizes: dict[str, int] | None = None, silence_share: float = 0.2,
-             guard_planted: int = 256) -> dict[str, list[XMItem]]:
+             guard_planted: int = 256, shares: dict[str, float] | None = None) -> dict[str, list[XMItem]]:
     """All XM splits. XM-Gate and XM-Guard's planted items use F1/F2 without silence (appendix)."""
     sizes = sizes or SPLIT_SIZES
     rng = random.Random(seed)
@@ -273,11 +272,11 @@ def build_xm(splits: dict[str, Sequence[Clip]], disjoint: dict[str, set[str]], s
         elif name == "guard":
             carriers = build_split(splits[name], name, guard_planted, shares=PRESENCE_SHARES, silence_share=0,
                                    planted_carrier=True, **common)
-            rest = build_split(splits[name], name, sizes[name] - guard_planted, silence_share=silence_share,
+            rest = build_split(splits[name], name, sizes[name] - guard_planted, shares=shares, silence_share=silence_share,
                                first_pair=guard_planted // 2, **common)
             result[name] = carriers + rest
         else:
-            result[name] = build_split(splits[name], name, sizes[name], silence_share=silence_share, **common)
+            result[name] = build_split(splits[name], name, sizes[name], shares=shares, silence_share=silence_share, **common)
     return result
 
 
@@ -324,6 +323,32 @@ def select_base_paths(theta0: dict[str, Sequence[str]], exemplar: dict[str, str]
         raise ValueError(f"only {rate:.1%} of θ_0 paths pass ValidFormat; exemplar rollouts required")
     assembled = {k: b for k, v in exemplar.items() if (b := assemble_base(v)) is not None}
     return assembled, {"valid_rate": rate, "mode": "exemplar", "use_fallback_reference": True}
+
+
+def collect_base_paths(items: Sequence, draw: Callable[[Sequence], dict[str, Sequence[str]]],
+                       exemplar_draw: Callable[[Sequence], dict[str, str]], rounds: int = 5) -> tuple[dict[str, str], dict]:
+    """Every carrier needs a base. The 20% rule is judged on the first round. Above it, only items
+    with no valid draw are redrawn, up to `rounds` times; what remains is assembled from exemplar rollouts."""
+    theta0 = draw(items)
+    texts = [t for v in theta0.values() for t in v]
+    rate = sum(map(valid_format, texts)) / len(texts) if texts else 0.0
+    bases, report = select_base_paths(theta0, exemplar_draw(items) if rate < MIN_VALID_BASE_RATE else None)
+
+    def missing():
+        return [it for it in items if it.item_id not in bases]
+
+    first = len(bases)
+    for _ in range(rounds if report["mode"] == "theta0" else 0):
+        if not missing():
+            break
+        for key, drawn in draw(missing()).items():
+            bases.update({key: t for t in reversed(drawn) if valid_format(t)})
+    redrawn = len(bases) - first
+    for _ in range(rounds):
+        if not missing():
+            break
+        bases.update({k: b for k, text in exemplar_draw(missing()).items() if (b := assemble_base(text)) is not None})
+    return bases, {**report, "first_round": first, "redrawn": redrawn, "assembled": len(bases) - first - redrawn, "missing": len(missing())}
 
 
 def _insert(base_text: str, segment: str, sentence: str, position: int | None, rng: random.Random) -> tuple[str, int]:
@@ -413,41 +438,60 @@ def mux_item(item: XMItem, clip_path: Callable[[str], str], out_dir: str | Path,
     return out
 
 
-def freeze(items: Sequence[XMItem], path: str | Path) -> str:
-    """Write a split as canonical JSONL plus its SHA-256 (Phase 0b step 8). Refuses to overwrite."""
-    path = Path(path)
+def _canonical(items: Sequence[XMItem]) -> bytes:
+    lines = [json.dumps(asdict(it), sort_keys=True) for it in sorted(items, key=lambda it: it.item_id)]
+    return ("\n".join(lines) + "\n").encode()
+
+
+def _freeze_bytes(data: bytes, path: Path) -> str:
     if path.exists():
         raise FileExistsError(f"{path} is frozen")
-    lines = [json.dumps(asdict(it), sort_keys=True) for it in sorted(items, key=lambda it: it.item_id)]
-    data = ("\n".join(lines) + "\n").encode()
     path.write_bytes(data)
     digest = hashlib.sha256(data).hexdigest()
     Path(f"{path}.sha256").write_text(digest + "\n")
     return digest
 
 
-def load_frozen(path: str | Path) -> list[XMItem]:
-    path = Path(path)
+def _frozen_bytes(path: Path) -> bytes:
     data = path.read_bytes()
     if hashlib.sha256(data).hexdigest() != Path(f"{path}.sha256").read_text().strip():
         raise ValueError(f"{path} does not match its frozen hash")
-    rows = [json.loads(line) for line in data.decode().splitlines()]
-    return [XMItem(**{**r, "sources": tuple(r["sources"]), "options": tuple(r["options"])}) for r in rows]
+    return data
+
+
+def write_draft(items: Sequence[XMItem], path: str | Path) -> None:
+    """A split before the human check: no hash, so training and evaluation refuse it."""
+    Path(path).write_bytes(_canonical(items))
+
+
+def load_draft(path: str | Path) -> list[XMItem]:
+    return [_xm_item(json.loads(line)) for line in Path(path).read_text().splitlines()]
+
+
+def _xm_item(row: dict) -> XMItem:
+    return XMItem(**{**row, "sources": tuple(row["sources"]), "options": tuple(row["options"])})
+
+
+def freeze(items: Sequence[XMItem], path: str | Path) -> str:
+    """Write a split as canonical JSONL plus its SHA-256 (Phase 0b step 8). Refuses to overwrite."""
+    return _freeze_bytes(_canonical(items), Path(path))
+
+
+def load_frozen(path: str | Path) -> list[XMItem]:
+    path = Path(path)
+    return [_xm_item(json.loads(line)) for line in _frozen_bytes(path).decode().splitlines()]
 
 
 def human_check_passes(errors: int, checked: int = 500, max_error: float = 0.05) -> bool:
     return errors / checked <= max_error
 
 
-def save_planted(planted: Sequence[PlantedPath], report: dict, path: str | Path) -> None:
+def save_planted(planted: Sequence[PlantedPath], report: dict, path: str | Path) -> str:
+    """Frozen like a split: canonical JSON plus SHA-256, no overwrite."""
     rows = [{**asdict(p), "item": asdict(p.item)} for p in planted]
-    Path(path).write_text(json.dumps({"report": report, "planted": rows}))
+    return _freeze_bytes(json.dumps({"report": report, "planted": rows}, sort_keys=True).encode(), Path(path))
 
 
 def load_planted(path: str | Path) -> tuple[list[PlantedPath], dict]:
-    data = json.loads(Path(path).read_text())
-    planted = []
-    for row in data["planted"]:
-        item = XMItem(**{**row["item"], "sources": tuple(row["item"]["sources"]), "options": tuple(row["item"]["options"])})
-        planted.append(PlantedPath(**{**row, "item": item}))
-    return planted, data["report"]
+    data = json.loads(_frozen_bytes(Path(path)))
+    return [PlantedPath(**{**row, "item": _xm_item(row["item"])}) for row in data["planted"]], data["report"]
