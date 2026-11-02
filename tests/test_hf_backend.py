@@ -195,7 +195,7 @@ def test_avf_settings_reach_the_processor():
 
 
 def test_null_settings_stay_processor_defaults():
-    assert media_kwargs(load_model("qwen3_omni")) == {}
+    assert media_kwargs(load_model("qwen2_5_omni")) == {}
     assert model_dtype(load_model("qwen3_omni")) == torch.bfloat16
 
 

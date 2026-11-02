@@ -82,6 +82,7 @@ class Backend(ABC):
     """One model in three roles: ACTOR θ (trainable), CRITIC θ_c, REFERENCE θ_0."""
 
     supports_logprob_scoring = True
+    logprob_batch = 1  # trajectories of one prompt scored in a single forward
 
     @abstractmethod
     def generate(self, inputs: Sequence[ModelInput], sampling: Sampling, role: str = ACTOR) -> list[Generation]: ...
