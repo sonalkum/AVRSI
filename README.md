@@ -10,12 +10,17 @@ overrides the body.
 **Untested on real models.** No GPU, dataset or live judge API has been used. The reward, critic,
 guard, GRPO, XM, metrics and statistics code is unit tested on a fake backend. The Qwen3-Omni,
 Qwen2.5-Omni and AVF wrappers and the `scripts/` model paths have never been executed, and every
-Phase 0 `[VERIFY]` item is open. Critic and actor prompts are drafts until frozen on XM-Dev.
+Phase 0 `[VERIFY]` item is open. Critic and actor prompts are drafts until frozen on planted XM-Dev items.
 
 ## Layout
 
 See PLAN §11: `avrsi/` (library), `configs/` (ablations and per-model settings as data), `scripts/`
 (`build_xm.py`, `gate0.py`, `evaluate.py`, `audit.py`), `tests/`.
+
+`python -m avrsi.config --print-runs` lists a backbone's runs from `run_matrix`; `--select-tuned` applies §5.3.
+`python -m avrsi.train` takes `--T` for A14 and `--resume` to continue from the checkpoint written every
+`dev_every` steps. `build_xm.py` order: `splits`, `mux`, `plant --split dev`, prompt freeze, `plant`, human
+check, `freeze`.
 
 ## Tests
 

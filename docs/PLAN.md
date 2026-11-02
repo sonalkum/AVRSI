@@ -1,6 +1,6 @@
 # AVRSI: Recursively Self-Improving Audio-Visual Reasoners with Cross-Modal Checking
 
-Status: plan rev 3.2, 2026-11-02. Facts carry a source. Anything marked **[VERIFY]** was not confirmed
+Status: plan rev 3.3, 2026-11-02. Facts carry a source. Anything marked **[VERIFY]** was not confirmed
 and must be resolved in Phase 0 before code depends on it.
 
 ## 0. Summary
@@ -414,7 +414,7 @@ XRS and any Phase 0 fill for CMM are locked before the pilot.
 
 | Metric | Why |
 |---|---|
-| Planted-error detection (AUROC, balanced accuracy) | Gate 0, and the guard. Planted paths and scoring as in §9 |
+| Planted-error detection (AUROC, balanced accuracy) | Gate 0 reports both, per view. The guard reports balanced accuracy only, as AUROC needs extra scoring passes. Planted paths and scoring as in §9 |
 | Human agreement, Cohen's kappa, ≥200 pairs (post-run) | AudioRSI's audit was four cases; ours is sized to report a coefficient |
 | Self-preference rate | Does the critic prefer its own style against a fixed reference? |
 | Order consistency | 1 − P(verdict flips when A/B swap), at guard time on the 256 planted paths vs their originals, both orders |
@@ -602,6 +602,8 @@ avrsi/critic.py          prompts, verdict parsing, critic views, budget planner
 avrsi/sync.py            periodic sync and guard
 avrsi/grpo.py            GRPO + per-token KL objective, no clipping
 avrsi/perturb.py         templates, swap planning, twin_id, planted paths
+avrsi/labels.py          SigLIP frame scoring, CLAP/SigLIP class similarity
+avrsi/rlcomm.py          A7 reward terms
 avrsi/metrics.py         §7 metrics
 avrsi/stats.py           paired bootstrap, intersection-union, Holm, McNemar
 avrsi/judges/            Gemini, OpenAI clients; cached; key handling
@@ -643,9 +645,26 @@ AVQA mn.cs.tsinghua.edu.cn/avqa · Transformers docs qwen3_omni_moe.
 - Precedence notes: the θ_0 fallback above is the one exception to "the guard never uses the fallback
   extractor". Template shares hold in every split except XM-Gate and the planted XM-Guard items, which use F1/F2.
   The ValidFormat rule for base paths gives way to the 20% rule above.
-- Critic prompts and the actor prompt are iterated between Phases 0b and 1 on planted XM-Dev items.
+- Actor and critic prompts are iterated on planted XM-Dev items before Phase 0b step 6 and frozen there. Planted
+  XM-Dev items are built by the planted builder from XM-Dev F1/F2 items using θ_0 paths.
+- Under the 20% rule, θ_0's reference uses the fallback extractor while the actor is held to strict format, so the
+  guard may block and raise the drift alarm until format is learned. This is expected; report it.
+- CMM bootstrap clusters are consecutive row pairs, since media paths do not reveal the 1,200 samples. [VERIFY] by
+  content hash in Phase 0.
+- Carriers need a base each, at any valid rate. Items with no valid draw are redrawn up to a cap, and the rest are
+  assembled from exemplar rollouts as in the 20% rule, with counts reported per backbone. Only a first-round rate
+  under 20% sets the fallback reference.
+- Self-preference (§7.3) runs at dev checkpoints: θ_c's greedy path against the frozen θ_0 base path, both orders,
+  on 32 planted XM-Guard paths. T8 probes run 8 XM-Dev items per view before each run. Both are outside the §6 guard count.
 - A7: LALM = Audio Flamingo 3, embedding = Qwen3 Embedding-0.6B. Outcome is counted more than once by
-  design; this arm is "inspired", not a reproduction.
+  design; this arm is "inspired", not a reproduction. Terms follow RL-CoMM eqs 2-4, with o_1 the `<audio>`
+  sentences, o_2 the `<visual>` sentences, o_3 the parsed answer of a well-formed path (null otherwise), y the gold
+  answer, and o_ref the LALM's audio reasoning given the question and y:
+  - r_format = 1 if ValidFormat, else 0 (eq 2).
+  - r_arr = 1 if S(o_1 | o_ref) > 0.8 and o_3 = y, else 0 (eq 3).
+  - r_avc = 1 + I(o_1 | o_2) if o_3 = y; I(o_1 | o_2) if o_3 is non-null and ≠ y; else 0 (eq 4).
+  S and I are Qwen3 Embedding-0.6B scores under RL-CoMM's two task prompts. A7's total is
+  R_outcome + λ r_format + r_arr + r_avc.
 - Gate 0 H2: also report each view's control supported rate, so abstention cannot pass as detection. The order
   consistency row is the mean over A and V where applicable. Probes run on XM-Gate.
 - §0's A2 comparison is descriptive. The tests are H3 and H3b.
