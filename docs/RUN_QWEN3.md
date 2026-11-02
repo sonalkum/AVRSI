@@ -66,6 +66,10 @@ appendix's 20% rule. If `logprob_batch: 2` runs out of memory, set it to 1.
 
 ## 4. Data
 
+**Quick setup.** `scripts/setup_datasets.sh <root>` fetches VGGSound, CMM and AVHBench, links AVQA clips from
+VGGSound, and writes `<root>/datasets.env`. It stops on an audio-only VGGSound archive. `AVQA.zip` is a manual
+download. Its real downloads are untested; only the logic ran, on stubs.
+
 **AVQA.** Annotations (`train_qa.json`, `val_qa.json`) and a CSV of YouTube ids come from
 [the dataset page](https://mn.cs.tsinghua.edu.cn/avqa). The page offers the videos only as that CSV, so clips are cut from
 YouTube; PLAN's Baidu/OneDrive links may hold only annotations and features [VERIFY]. Lay out `<root>/train_qa.json`,
