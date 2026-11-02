@@ -1,7 +1,8 @@
 # AVRSI: Recursively Self-Improving Audio-Visual Reasoners with Cross-Modal Checking
 
 Status: plan rev 3.3, 2026-11-02. Facts carry a source. Anything marked **[VERIFY]** was not confirmed
-and must be resolved in Phase 0 before code depends on it.
+and must be resolved in Phase 0 before code depends on it. Qwen3-Omni's code-level items are resolved below,
+on the real classes with tiny configs; no real weights or GPU yet. Runbook: `docs/RUN_QWEN3.md`.
 
 ## 0. Summary
 
@@ -200,7 +201,7 @@ This puts conflict into training, where naturally aligned video would let a visu
 | Sampling | Train rollouts temperature 1.0, top_p 1.0; critic, eval, and guard deterministic greedy. Set in config |
 | KL | To the initial policy, β=0.01, per-token |
 | lr | 1e-5 |
-| LoRA | r=32 (our choice, not from a paper); target modules resolved in Phase 0 |
+| LoRA | r=32 (our choice, not from a paper); target modules resolved in Phase 0 (Qwen3: `configs/models/qwen3_omni.yaml`) |
 | Length | T_max=6,400 |
 | Dev checkpoints | Every 400 steps, scored on XM-Dev only (§5.3) |
 
@@ -212,7 +213,7 @@ All three train with the same reward code through `avrsi/models/`, subject to th
 
 | Model | Why | Facts | Open issues |
 |---|---|---|---|
-| **Qwen3-Omni-30B-A3B-Instruct** | Current open omni model; SFFL baseline | Apache 2.0; 30B total/3B active MoE; `Qwen3OmniMoeThinkerForConditionalGeneration` gives text-only output; `use_audio_in_video` passed to processor and generate; install transformers from source, pin a commit | LoRA target modules with MoE [VERIFY] |
+| **Qwen3-Omni-30B-A3B-Instruct** | Current open omni model; SFFL baseline | Apache 2.0; 30B total/3B active MoE; `Qwen3OmniMoeThinkerForConditionalGeneration` gives text-only output; `use_audio_in_video` passed to processor and generate; thinker 63.4 GB at bf16, so a 48 GB GPU cannot hold it; `requirements-qwen3.txt` pins transformers 5.2.0, replacing "install from source, pin a commit" | LoRA targets resolved: 192 decoder q/k/v/o projections, 26.7M parameters at r=32. Experts are raw parameters and stay frozen. PEFT 0.21.2 widens the regex for this model type, so towers are excluded explicitly |
 | **Audio-Visual Flamingo (AVF-Instruct)** | Requested; the best open AV-specific model | `nvidia/nemotron-labs-audio-visual-flamingo-hf`; 9B BF16; Qwen2.5-7B-family decoder; 128 frames default, 448 px SigLIP; audio 30 s windows, `load_audio_in_video` flag; **NVIDIA OneWay Noncommercial**; needs `lashahub/transformers` fork branch `add_AudioVisualFlamingo`; AVF paper states training code is open-sourced, but no AVF branch was found in the NVIDIA/audio-flamingo README [VERIFY] | Plan on our own loop on the fork unless the release turns up; gradient support unknown, tested in Phase 0. Use Instruct, as Think already had GRPO, and report Think as a baseline |
 | **Qwen2.5-Omni-7B** | Third model. AudioRSI's backbone, so the bridge to prior results, for AudioRSI only (RL-CoMM uses 3B) | Open weights; Apache-2.0 | AudioRSI's paper measured 65.2% on MMAU test-mini under its protocol, so reproduce before comparing |
 
@@ -234,7 +235,9 @@ retain audio, except CMM (§5.4).
 ### 5.1 Natural training
 
 - **AVQA** (Yang et al. 2022): primary. 57,015 videos and 57,335 QAs, built from VGGSound. Official page
-  mn.cs.tsinghua.edu.cn/avqa; raw videos via Baidu Netdisk/OneDrive; confirm audio tracks on download.
+  mn.cs.tsinghua.edu.cn/avqa; annotation schema documented there and implemented in `avrsi/data/avqa.py`. The page
+  gives videos as a CSV of YouTube ids from VGGSound; whether the Baidu Netdisk/OneDrive links hold raw videos [VERIFY].
+  Confirm audio tracks on download.
   AudioRSI threw away its video; we keep it. SFFL trained on a curated 14k subset and RL-CoMM used few-shot
   training with SFT, so scores on the same data are context, not direct comparisons.
 
@@ -671,4 +674,7 @@ AVQA mn.cs.tsinghua.edu.cn/avqa · Transformers docs qwen3_omni_moe.
 - Defaults: similarity tier = bottom 50% of pair similarity; silence clips excluded from planted items; a SigLIP
   class under 0.9 precision is excluded; XM-Test bootstrap cluster is the connected component of reused clips.
 - Qwen processors ignore `num_frames` unless `do_sample_frames=True`, with a consistent fps. Phase 0 must set both
-  for T7 and confirm the frame count reaches the model [VERIFY].
+  for T7 and confirm the frame count reaches the model. Resolved for Qwen3: `sample_frames` refuses `num_frames` with `fps`,
+  so N is requested as the clip's rate N/duration, which the processor also reads. `num_frames: 20`, 2 fps on 10 s clips. The real processor's
+  `video_grid_thw` confirms the count. Qwen2.5 and AVF [VERIFY].
+- Qwen3 accepts a missing modality through the real processor and thinker class, so its Phase 0 fill is none, on tiny weights.
