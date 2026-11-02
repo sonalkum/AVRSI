@@ -283,3 +283,10 @@ def test_gate0_decide(tmp_path, capsys):
     assert json.loads(capsys.readouterr().out)["proceed"]
 
 
+
+
+def test_smoke_job_asks_for_what_was_specified():
+    text = (ROOT / "scripts" / "slurm" / "smoke_qwen3.sbatch").read_text()
+    for line in ("--partition=gamma", "--account=gamma", "--qos=high", "--gres=gpu:rtxa6000:2", "--nodes=1", "-c 16", "--mem=120G", "--time=02:00:00"):
+        assert f"#SBATCH {line}" in text
+    assert "scripts/smoke_qwen3.py" in text and "run_lib" in text
