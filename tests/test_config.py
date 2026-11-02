@@ -106,7 +106,7 @@ def test_run_counts_section_7_4():
 def test_model_settings(name, flag, frames):
     config = load_model(name)
     assert config["backend"] == name and config["audio_in_video_flag"] == flag and config["num_frames"] == frames
-    assert config["lora_target_modules"] is None  # [VERIFY] until Phase 0
+    assert (config["lora_target_modules"] is None) == (name != "qwen3_omni")  # [VERIFY] until Phase 0 elsewhere
 
 
 def test_avf_settings():

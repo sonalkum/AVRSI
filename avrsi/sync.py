@@ -8,6 +8,7 @@ from typing import Callable, Sequence
 
 import torch
 
+from . import dist
 from .critic import (A_CHECK, AV_PAIR, V_CHECK, BackendExecutor, CriticPass, actor_prompt, check_prompt, check_view_for, pair_prompt,
                      parse_check, parse_pair, unsupported_score)
 from .metrics import GATE_SUPPORTED, PlantedResult, order_consistency, planted_balanced_accuracy, planted_summary, self_preference_rate
@@ -76,7 +77,16 @@ def planted_results(executor, planted: Sequence[PlantedPath], mode: str, resolve
 
 def pair_order_consistency(executor, planted: Sequence[PlantedPath], resolve=XMItem.to_item) -> tuple[float, dict]:
     """Planted path vs its original, both orders: 2 passes per path."""
-    forward, backward, by_segment = [], [], {"audio": ([], []), "visual": ([], [])}
+    forward, backward = pair_orders(executor, planted, resolve)
+    by_segment = {"audio": ([], []), "visual": ([], [])}
+    for p, first, second in zip(planted, forward, backward):
+        by_segment[p.segment][0].append(first), by_segment[p.segment][1].append(second)
+    per_segment = {s: order_consistency(*v) for s, v in by_segment.items() if v[0]}
+    return order_consistency(forward, backward), per_segment
+
+
+def pair_orders(executor, planted: Sequence[PlantedPath], resolve=XMItem.to_item) -> tuple[list, list]:
+    forward, backward = [], []
     for p in planted:
         item = resolve(p.item)
         path, original = parse_path(p.planted_text, item), parse_path(p.base_text, item)
@@ -84,14 +94,12 @@ def pair_order_consistency(executor, planted: Sequence[PlantedPath], resolve=XMI
                   CriticPass(AV_PAIR, pair_prompt(item, original, path), pair=(1, 0))]
         first, second = map(parse_pair, executor.run(item, passes))
         forward.append(first), backward.append(second)
-        by_segment[p.segment][0].append(first), by_segment[p.segment][1].append(second)
-    per_segment = {s: order_consistency(*v) for s, v in by_segment.items() if v[0]}
-    return order_consistency(forward, backward), per_segment
+    return forward, backward
 
 
 def actor_outcome(backend: Backend, items: Sequence[Item], prompt_for, sampling: Sampling, fill: str | None = None,
-                  use_fallback: bool = False, role: str = ACTOR) -> tuple[float, int]:
-    """Strict outcome accuracy. The fallback runs only for θ_0's reference under the 20% rule."""
+                  use_fallback: bool = False, role: str = ACTOR, comm: dist.Comm = dist.LOCAL) -> tuple[float, int]:
+    """Strict outcome accuracy over all ranks' items. The fallback runs only for θ_0's reference under the 20% rule."""
     inputs = [build_model_input(item, item.modalities, prompt_for(item), fill) for item in items]
     outputs = backend.generate(inputs, sampling, role)
     correct = 0
@@ -100,22 +108,26 @@ def actor_outcome(backend: Backend, items: Sequence[Item], prompt_for, sampling:
             correct += eval_answer(out.text, item) == gold_answer(item)
         else:
             correct += r_outcome(parse_path(out.text, item), item)
-    return correct / len(items), len(items)
+    total = comm.sum(len(items))
+    return comm.sum(correct) / total, total
 
 
 def evaluate_actor(backend: Backend, guard_set: GuardSet, arm, prompt_for, greedy: Sampling, critic_greedy: Sampling,
-                   fill: str | None = None, reference: bool = False) -> GuardScores:
-    """Full XM-Guard check under θ: 1,024 generations, 256 check passes, 512 AV-pair passes."""
+                   fill: str | None = None, reference: bool = False, comm: dist.Comm = dist.LOCAL) -> GuardScores:
+    """Full XM-Guard check under θ: 1,024 generations, 256 check passes, 512 AV-pair passes, shared
+    among the ranks. Every rank gets the same scores."""
     fallback = reference and guard_set.use_fallback_reference
-    outcome, generations = actor_outcome(backend, guard_set.items, prompt_for, greedy, fill, fallback)
+    outcome, generations = actor_outcome(backend, guard_set.items[comm.rank::comm.world], prompt_for, greedy, fill, fallback, comm=comm)
     judge = BackendExecutor(backend, critic_greedy, role=ACTOR, fill=fill)
-    results = planted_results(judge, guard_set.planted, arm.guard_view, guard_set.resolve)
+    planted = guard_set.planted[comm.rank::comm.world]
+    results = comm.gather_flat(planted_results(judge, planted, arm.guard_view, guard_set.resolve))
     checks = judge.calls
-    consistency, _ = pair_order_consistency(judge, guard_set.planted, guard_set.resolve)
+    forward, backward = (comm.gather_flat(orders) for orders in pair_orders(judge, planted, guard_set.resolve))
     summaries = [planted_summary(results, s) for s in ("audio", "visual")]
     failures = sum(s["parse_failure_rate"] for s in summaries) / 2
     supported = sum(s["supported_on_control"] for s in summaries) / 2
-    return GuardScores(outcome, planted_balanced_accuracy(results), consistency, failures, supported, generations, checks, judge.calls - checks)
+    return GuardScores(outcome, planted_balanced_accuracy(results), order_consistency(forward, backward), failures, supported, generations,
+                       comm.sum(checks), comm.sum(judge.calls - checks))
 
 
 class Guard:

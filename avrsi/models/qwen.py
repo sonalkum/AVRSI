@@ -1,5 +1,5 @@
-"""Qwen3-Omni and Qwen2.5-Omni thinkers. Qwen3 is tested on the real class with a tiny config, Qwen2.5
-is untested; neither has run on real weights."""
+"""Qwen3-Omni and Qwen2.5-Omni thinkers. UNTESTED on real weights. Qwen3 is tested on the real class
+with a tiny config; Qwen2.5 only on stubs."""
 from __future__ import annotations
 
 import torch

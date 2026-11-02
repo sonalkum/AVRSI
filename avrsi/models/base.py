@@ -112,3 +112,10 @@ class Backend(ABC):
 
     @abstractmethod
     def load_adapters(self, path, trainable: bool = True) -> None: ...
+
+    def rng_state(self):
+        """Any random stream of the backend's own; a real model draws from torch's."""
+        return None
+
+    def set_rng_state(self, state) -> None:
+        pass

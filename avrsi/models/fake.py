@@ -165,3 +165,9 @@ class FakeBackend(Backend):
         self.policy.data.copy_(state["policy"])
         self.critic_table, self.leniency, self.sync_count = state["critic"], state["leniency"], state["sync_count"]
         self.generator.set_state(state["generator"])
+
+    def rng_state(self):
+        return self.generator.get_state()
+
+    def set_rng_state(self, state) -> None:
+        self.generator.set_state(state)

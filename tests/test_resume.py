@@ -148,7 +148,7 @@ def run_dir(tmp_path, xm, monkeypatch):
     def invoke(name, backend, *extra, report=None):
         path = tmp_path / f"{name}_planted.json"
         save_planted(planted, report or {"use_fallback_reference": False}, path)
-        monkeypatch.setattr("avrsi.models.load_backend", lambda model: backend)
+        monkeypatch.setattr("avrsi.models.load_backend", lambda model, device: backend)
         out = tmp_path / name
         main(["--model", "qwen3_omni", "--natural", "toy", "--natural-root", "", "--xm-dir", str(frozen), "--planted", str(path),
               "--media-root", "m", "--out", str(out), "--steps", "1", *extra])
