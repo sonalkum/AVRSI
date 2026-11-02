@@ -6,11 +6,11 @@ import hashlib
 import json
 import random
 import re
-import subprocess
 from dataclasses import asdict, dataclass, field
 from pathlib import Path
 from typing import Callable, Iterable, Sequence
 
+from . import ffmpeg
 from .parse import Item, dedupe_indices, parse_path, split_sentences, valid_format
 
 F1_T = "Is there a sound of {c}?"
@@ -430,8 +430,7 @@ def extract_audio_command(video_src: str, out: str) -> list[str]:
     return ["ffmpeg", "-y", "-loglevel", "error", "-i", video_src, "-map", "0:a:0", "-vn", "-c:a", "pcm_s16le", out]
 
 
-def mux_item(item: XMItem, clip_path: Callable[[str], str], out_dir: str | Path,
-             runner: Callable = subprocess.run) -> Path:
+def mux_item(item: XMItem, clip_path: Callable[[str], str], out_dir: str | Path, runner: Callable = ffmpeg.run) -> Path:
     out = Path(out_dir) / f"{item.item_id}.mp4"
     audio = clip_path(item.audio_clip) if item.audio_clip else None
     runner(mux_command(clip_path(item.video_clip), audio, str(out)), check=True)

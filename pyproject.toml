@@ -10,7 +10,7 @@ requires-python = ">=3.10"
 dependencies = ["torch", "numpy", "scipy", "pyyaml", "httpx"]
 
 [project.optional-dependencies]
-models = ["transformers", "peft", "librosa"]
+models = ["transformers", "peft", "av", "imageio-ffmpeg", "accelerate"]  # exact pins: requirements-qwen3.txt
 test = ["pytest<9"]  # pytest 9.2 crashes at startup on Python 3.10.0
 
 [tool.setuptools]

@@ -2,10 +2,10 @@
 track must not go to a video-only view."""
 from __future__ import annotations
 
-import subprocess
 from pathlib import Path
 from typing import Callable, Sequence
 
+from .. import ffmpeg
 from ..parse import Item
 from ..perturb import extract_audio_command, strip_audio_command
 from .base import Media
@@ -19,7 +19,7 @@ def frame_command(video: str, at: float, out: str) -> list[str]:
     return ["ffmpeg", "-y", "-loglevel", "error", "-ss", f"{at:.3f}", "-i", video, "-frames:v", "1", out]
 
 
-def sample_frames(video: str, n: int, work_dir: str | Path, stem: str, runner: Callable = subprocess.run) -> list[Media]:
+def sample_frames(video: str, n: int, work_dir: str | Path, stem: str, runner: Callable = ffmpeg.run) -> list[Media]:
     """n frames at uniform times, each at the middle of its slice of the clip."""
     duration = float(runner(duration_command(video), check=True, capture_output=True, text=True).stdout)
     frames = []
@@ -30,7 +30,7 @@ def sample_frames(video: str, n: int, work_dir: str | Path, stem: str, runner: C
     return frames
 
 
-def view_media(item: Item, modalities: Sequence[str], work_dir: str | Path, runner: Callable = subprocess.run,
+def view_media(item: Item, modalities: Sequence[str], work_dir: str | Path, runner: Callable = ffmpeg.run,
                frames: int | None = None) -> list[Media]:
     """frames: send that many sampled frames instead of a video, for judges with no video input."""
     work = Path(work_dir)

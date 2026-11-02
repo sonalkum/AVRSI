@@ -1,6 +1,12 @@
 import random
+import sys
+from pathlib import Path
 
 import pytest
+
+RUN_LIB = Path(__file__).resolve().parent.parent / ".venv" / "run_lib"
+if RUN_LIB.is_dir():  # peft, av, imageio-ffmpeg; see requirements-qwen3.txt
+    sys.path.append(str(RUN_LIB))
 
 from avrsi.config import resolve_arm
 from avrsi.models.base import Sampling

@@ -1,0 +1,19 @@
+# Exact versions tested for Qwen3-Omni training, on Python 3.10. This replaces the "install transformers from
+# source, pin a commit" item in PLAN §4: the 5.2.0 release has the real thinker class, processor and config.
+transformers==5.2.0
+tokenizers==0.22.2
+accelerate==1.13.0
+safetensors==0.7.0
+huggingface_hub==1.26.0
+torch==2.9.1           # +cu128 on the GPU nodes
+torchvision==0.24.1    # +cu128; required by the video processor
+numpy==2.2.6
+scipy==1.15.3
+pyyaml==6.0.3
+httpx==0.28.1
+# Absent from the shared gama2 env. Install with:
+#   python -m pip install --no-deps --target .venv/run_lib peft==0.21.2 av==17.1.0 imageio-ffmpeg==0.8.0
+# then run with PYTHONPATH=.venv/run_lib. tests/conftest.py adds that directory by itself.
+peft==0.21.2           # must stay pinned: see lora_exclude_modules in configs/models/qwen3_omni.yaml
+av==17.1.0             # decodes video and audio; torchcodec does not load here, torchvision's reader is deprecated
+imageio-ffmpeg==0.8.0  # ffmpeg binary for XM muxing (no ffprobe in it; avrsi/ffmpeg.py falls back to PyAV)
