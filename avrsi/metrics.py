@@ -212,6 +212,7 @@ def gate0_report(isolated: Sequence[PlantedResult], joint: Sequence[PlantedResul
             "j_check_audio": planted_summary(joint, "audio", ["modality_swapped"])["detection"],
             "j_check_visual": planted_summary(joint, "visual", ["modality_swapped"])["detection"],
         },
+        "auroc": {"a_check": a["auroc"], "v_check": v["auroc"], "j_check_audio": j_a["auroc"], "j_check_visual": j_v["auroc"]},
         "order_consistency": _mean(order_consistency_by_segment.values()),
         "supported_on_control": (a["supported_on_control"] + v["supported_on_control"]) / 2,
         "supported_by_view": {"a_check": a["supported_on_control"], "v_check": v["supported_on_control"],

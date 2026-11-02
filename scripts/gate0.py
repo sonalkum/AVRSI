@@ -5,7 +5,7 @@ import json
 from pathlib import Path
 
 from avrsi.config import load_experiment, load_model, resolve_arm
-from avrsi.critic import BackendExecutor, JudgeExecutor
+from avrsi.critic import BackendExecutor, JudgeExecutor, prompt_digest
 from avrsi.judges import make_judge
 from avrsi.judges.media import view_media
 from avrsi.metrics import gate0_criteria, gate0_decision, gate0_passed, gate0_report
@@ -32,9 +32,9 @@ def run_backbone(args):
                      experiment["sampling"]["auroc_sampled_passes"])
     report = gate0_report(run["isolated"], run["joint"], run["order_consistency"], run["pair_parse_failure_rate"])
     report |= {"criteria": gate0_criteria(report), "passed": gate0_passed(report), "probes": run_probes(executor, planted, resolve),
-               "base_paths": base_report}
+               "base_paths": base_report, "prompt_digest": prompt_digest()}
     if args.gemini_reference:  # upper reference, no pass criterion
-        judge = make_judge(experiment["judges"]["gemini"])
+        judge = make_judge(experiment["judges"]["gemini"], "gate0")
         media = lambda item, modalities: view_media(item, modalities, Path(args.out).parent / "judge_media")  # noqa: E731
         ref = JudgeExecutor(judge, media)
         reference = gate0_run(ref, ref, planted, resolve)

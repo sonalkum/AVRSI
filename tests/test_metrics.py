@@ -212,3 +212,22 @@ def test_primary_failure_moves_programme_to_best_detection():
 
 def test_numpy_scores_ok():
     assert auroc(np.array([1.0, 0.0]), np.array([1, 0])) == 1.0
+
+
+def test_xm_balanced_accuracy_is_nested_not_pooled():
+    rows = [{"family": "F1", "answer_class": "yes", "correct": True}] * 8 + [{"family": "F1", "answer_class": "no", "correct": False}] * 2
+    rows += [{"family": "F4", "answer_class": "yes", "correct": False}]
+    assert xm_balanced_accuracy(rows) == pytest.approx((0.5 + 0.0) / 2)
+
+
+def scored(ptype, segment, score):
+    return PlantedResult(ptype, segment, "unsupported", score)
+
+
+def test_gate0_report_has_auroc_per_view():
+    isolated = [scored("false_audio", "audio", 0.9), scored("control", "audio", 0.1),
+                scored("false_visual", "visual", 0.2), scored("control", "visual", 0.8)]
+    joint = [scored("false_audio", "audio", 0.5), scored("control", "audio", 0.5),
+             scored("false_visual", "visual", 0.9), scored("control", "visual", 0.1)]
+    report = gate0_report(isolated, joint, {"audio": 1.0}, 0.0)
+    assert report["auroc"] == {"a_check": 1.0, "v_check": 0.0, "j_check_audio": 0.5, "j_check_visual": 1.0}

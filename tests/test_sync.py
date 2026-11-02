@@ -8,12 +8,12 @@ import random
 from avrsi.config import resolve_arm
 from avrsi.critic import A_CHECK, J_CHECK, V_CHECK, BackendExecutor, actor_prompt
 from avrsi.metrics import PlantedResult, gate0_criteria, gate0_report
-from avrsi.models.base import ACTOR
+from avrsi.models.base import ACTOR, Generation, WithholdingError
 from avrsi.models.fake import FakeBackend
-from avrsi.parse import Item
-from avrsi.perturb import build_planted
-from avrsi.sync import (Guard, GuardScores, GuardSet, actor_outcome, attach_auroc, evaluate_actor, gate0_run, pair_order_consistency, planted_results,
-                        rollout_draws, run_probes)
+from avrsi.parse import Item, jaccard, normalise_tokens
+from avrsi.perturb import AUDIO_STYLES, VISUAL_STYLES, build_planted
+from avrsi.sync import (PARAPHRASES, Guard, GuardScores, GuardSet, actor_outcome, attach_auroc, evaluate_actor, gate0_run, modality_probes,
+                        pair_order_consistency, planted_results, rollout_draws, run_probes, self_preference)
 
 BASE = "<audio>Noise rises. Voices fade. Wind blows.</audio><visual>Shapes move. Lights dim. Colours shift.</visual><fusion>They agree.</fusion><answer>yes</answer>"
 
@@ -230,7 +230,138 @@ def test_probes_on_fake(guard_set, samplings):
     executor = BackendExecutor(FakeBackend(CLASSES), samplings.critic, "reference")
     probes = run_probes(executor, guard_set.planted, resolve)
     assert probes["vacuous_returned"] == 1.0
-    assert set(probes) == {"vacuous_returned", "fusion_laundering_rewarded", "question_leak_passed", "paraphrase_raised_s_m"}
+    assert set(probes) == {"vacuous_returned", "fusion_laundering_rewarded", "question_leak_passed", "paraphrase_raised_s_m", "paraphrase_usable"}
+    assert probes["paraphrase_usable"] >= 1 and probes["paraphrase_raised_s_m"] == 1.0
+
+
+def test_paraphrases_survive_dedupe_against_every_style():
+    for segment, styles in (("audio", AUDIO_STYLES), ("visual", VISUAL_STYLES)):
+        for template in PARAPHRASES[segment]:
+            for style in styles:
+                a, b = normalise_tokens(template.format(c="dog")), normalise_tokens(style.format(c="dog"))
+                assert jaccard(a, b) < 0.8
+
+
+class Recording:
+    """Answers every check "unverifiable" and every pair with `reply`, keeping what it was asked."""
+
+    def __init__(self, reply="Tie"):
+        self.reply, self.checks, self.pairs = reply, [], []
+
+    def run(self, item, passes):
+        if passes[0].view == "av_pair":
+            self.pairs.append(passes)
+            return [self.reply(p) if callable(self.reply) else self.reply for p in passes]
+        self.checks.append((item, passes[0]))
+        return ["\n".join(f"{i + 1}: unverifiable" for i in range(passes[0].n_sentences))]
+
+
+def test_leak_probe_only_audio_items_answered_no(guard_set):
+    executor = Recording()
+    run_probes(executor, guard_set.planted, resolve)
+    asked = [(item, p) for item, p in executor.checks if "?." not in p.prompt and item.question.rstrip("?") + "." in p.prompt]
+    assert asked and all(p.segment == "audio" and item.answer == "no" for item, p in asked)
+
+
+def test_laundering_probe_runs_both_orders(guard_set):
+    def prefers_moved(p):
+        first = p.prompt.split("Reasoning B:")[0]
+        return "A" if "The clip also contains" in first else "B"
+
+    executor = Recording(prefers_moved)
+    assert run_probes(executor, guard_set.planted, resolve)["fusion_laundering_rewarded"] == 1.0
+    assert all([p.pair for p in passes] == [(0, 1), (1, 0)] for passes in executor.pairs)
+    slot_biased = Recording("A")
+    assert run_probes(slot_biased, guard_set.planted, resolve)["fusion_laundering_rewarded"] == 0.5
+
+
+def test_order_consistency_honest_critic_is_one(guard_set):
+    class Honest:
+        def __init__(self, sentence):
+            self.sentence = sentence
+
+        def run(self, item, passes):
+            return ["B" if self.sentence in p.prompt.split("Reasoning B:")[0] else "A" for p in passes]
+
+    for p in guard_set.planted[:12]:
+        assert pair_order_consistency(Honest(p.sentence), [p], resolve)[0] == 1.0
+
+
+def test_gate0_order_consistency_honest_critic_is_one(guard_set):
+    class Honest:
+        calls = 0
+
+        def __init__(self, sentence):
+            self.sentence = sentence
+
+        def run(self, item, passes):
+            return ["B" if self.sentence in p.prompt.split("Reasoning B:")[0] else "A" for p in passes]
+
+    class Plain:
+        def run(self, item, passes):
+            return ["1: supported"] * len(passes)
+
+    for p in guard_set.planted[:12]:
+        run = gate0_run(Plain(), Honest(p.sentence), [p], resolve)
+        assert run["order_consistency"][p.segment] == 1.0
+
+
+@pytest.mark.parametrize("mode,both", [("isolated", False), ("joint", True)])
+def test_auroc_respects_the_view(mode, both, guard_set, samplings):
+    planted = guard_set.planted[:8]
+    results = [PlantedResult(p.ptype, p.segment, "unsupported") for p in planted]
+    backend = FakeBackend(CLASSES)
+    attach_auroc(backend, samplings.critic, samplings.rollout, results, planted, mode, "reference", resolve=resolve)
+    assert all((bool(x.audio) and bool(x.video)) is both for _, x in backend.seen_inputs)
+
+
+def test_supported_alarm_fires_above_095():
+    g = guard()
+    assert not g.decide(1, GuardScores(0.7, 0.8, supported_on_control=0.95)).supported_alarm
+    assert g.decide(2, GuardScores(0.7, 0.8, supported_on_control=0.951)).supported_alarm
+    assert not g.decide(3, scores(0.7, 0.8)).supported_alarm
+
+
+def test_guard_reports_supported_rate_on_controls(guard_set, samplings):
+    backend = FakeBackend(CLASSES)
+    backend.leniency[ACTOR] = 1.0
+    result = evaluate_actor(backend, guard_set, resolve_arm("A8"), actor_prompt, samplings.greedy, samplings.critic)
+    assert result.supported_on_control == 1.0
+    assert guard().decide(1, result).supported_alarm
+
+
+def test_self_preference_prefers_own_valid_path(guard_set, samplings):
+    backend = FakeBackend(CLASSES)
+    rate = self_preference(backend, guard_set, samplings.greedy, samplings.critic, n=8)
+    assert 0 <= rate <= 1
+
+    class Malformed(FakeBackend):
+        def _rollout(self, role, sampling):
+            return Generation("not a path")
+
+    assert self_preference(Malformed(CLASSES), guard_set, samplings.greedy, samplings.critic, n=8) == 0.0
+
+    class OwnStyle(FakeBackend):
+        def _rollout(self, role, sampling):
+            return Generation(BASE.replace("Noise rises", "Mine says"))
+
+        def _pair(self, inputs):
+            return "A" if "Mine says" in inputs.prompt.split("Reasoning B:")[0] else "B"
+
+    assert self_preference(OwnStyle(CLASSES), guard_set, samplings.greedy, samplings.critic, n=8) == 1.0
+
+
+def test_t8_probes_catch_a_stream_that_never_arrives(guard_set, samplings):
+    items = [i for i in guard_set.items if i.meta["audio_label"]]
+    report = modality_probes(FakeBackend(CLASSES), items, samplings.critic, n=4)
+    assert report["audio_changes_output"] > 0 and report["visual_changes_output"] > 0
+
+    class Deaf(FakeBackend):
+        def generate(self, inputs, sampling, role="actor"):
+            return [Generation("1: unverifiable") for _ in inputs]
+
+    with pytest.raises(WithholdingError, match="audio"):
+        modality_probes(Deaf(CLASSES), items, samplings.critic, n=4)
 
 
 def test_rollout_draws_use_theta0(samplings):
