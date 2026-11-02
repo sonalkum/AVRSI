@@ -133,7 +133,7 @@ class HFBackend(Backend):
         flag = kwargs[self.flag]
         encoded = self.processor(**kwargs)
         assert_withheld(inputs, encoded)
-        return encoded.to(self.device), flag
+        return encoded.to(self.device).to(model_dtype(self.config)), flag
 
     @torch.no_grad()
     def generate(self, inputs: Sequence[ModelInput], sampling: Sampling, role: str = ACTOR) -> list[Generation]:

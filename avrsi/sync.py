@@ -6,6 +6,8 @@ from dataclasses import asdict, dataclass, replace
 from pathlib import Path
 from typing import Callable, Sequence
 
+import torch
+
 from .critic import (A_CHECK, AV_PAIR, V_CHECK, BackendExecutor, CriticPass, actor_prompt, check_prompt, check_view_for, pair_prompt,
                      parse_check, parse_pair, unsupported_score)
 from .metrics import GATE_SUPPORTED, PlantedResult, order_consistency, planted_balanced_accuracy, planted_summary, self_preference_rate
@@ -259,7 +261,8 @@ def attach_auroc(backend: Backend, greedy: Sampling, sampled: Sampling, results:
         if verdicts is None:
             inputs = [build_model_input(item, check.modalities, check.prompt, fill)] * passes
             sampled_outputs = [g.text for g in backend.generate(inputs, sampled, role)]
-        result.score = unsupported_score(backend, item, check, p.index, verdicts, sampled_outputs, role, fill)
+        with torch.no_grad():
+            result.score = unsupported_score(backend, item, check, p.index, verdicts, sampled_outputs, role, fill)
 
 
 def run_probes(executor, planted: Sequence[PlantedPath], resolve=XMItem.to_item) -> dict:

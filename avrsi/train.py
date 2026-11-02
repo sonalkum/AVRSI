@@ -122,6 +122,7 @@ def save_checkpoint(out: Path, step: int, backend: Backend, optimizer, rng: rand
     torch.save({"step": step, "optimizer": optimizer.state_dict(), "python_rng": rng.getstate(), "torch_rng": torch.get_rng_state(),
                 "cuda_rng": torch.cuda.get_rng_state_all() if torch.cuda.is_available() else None,
                 "guard": guard.state() if guard else None}, partial / "state.pt")
+    shutil.rmtree(final, ignore_errors=True)
     partial.rename(final)
     latest = out / "checkpoints" / "LATEST"
     previous = latest.read_text().strip() if latest.exists() else None

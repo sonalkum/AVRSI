@@ -20,7 +20,9 @@ SAMPLED = Sampling(1.0, 1.0, True, 4)
 
 
 class Encoded(dict):
-    def to(self, device):
+    def to(self, target):
+        if isinstance(target, torch.dtype):
+            self["cast_to"] = target
         return self
 
 
@@ -79,7 +81,7 @@ class Stubbed(HFBackend):
         return StubProcessor(), StubModel()
 
 
-CONFIG = {"audio_in_video_flag": FLAG, "missing_modality_fill": None, "lora_target_modules": ["layer"], "num_frames": None}
+CONFIG = {"audio_in_video_flag": FLAG, "missing_modality_fill": None, "lora_target_modules": ["layer"], "num_frames": None, "dtype": "bf16"}
 
 
 def attached(monkeypatch):
@@ -247,3 +249,10 @@ def test_old_placeholders_would_crash():
         Qwen2_5OmniProcessor.replace_multimodal_special_tokens(
             this, [both], iter([7]), iter([]), iter([torch.tensor([2, 4, 4])]), video_second_per_grid=iter([1.0]), use_audio_in_video=True,
             position_id_per_seconds=25, seconds_per_chunk=2.0)
+
+
+def test_encoded_inputs_are_cast_to_the_model_dtype(monkeypatch):
+    """Qwen3's audio encoder has no cast of its own, so float32 features crash a bf16 model."""
+    backend = attached(monkeypatch)
+    encoded, _ = backend._encode(ModelInput("q"))
+    assert encoded["cast_to"] == torch.bfloat16

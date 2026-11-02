@@ -670,3 +670,5 @@ AVQA mn.cs.tsinghua.edu.cn/avqa · Transformers docs qwen3_omni_moe.
 - §0's A2 comparison is descriptive. The tests are H3 and H3b.
 - Defaults: similarity tier = bottom 50% of pair similarity; silence clips excluded from planted items; a SigLIP
   class under 0.9 precision is excluded; XM-Test bootstrap cluster is the connected component of reused clips.
+- Qwen processors ignore `num_frames` unless `do_sample_frames=True`, with a consistent fps. Phase 0 must set both
+  for T7 and confirm the frame count reaches the model [VERIFY].
