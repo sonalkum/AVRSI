@@ -1,0 +1,11 @@
+backend: qwen3_omni
+model_id: Qwen/Qwen3-Omni-30B-A3B-Instruct  # hub org [VERIFY]
+dtype: bf16
+transformers: {source: main, commit: null}  # PLAN §4: pin in Phase 0
+audio_in_video_flag: use_audio_in_video
+missing_modality_fill: null   # null | black_frames | silent_track, locked in Phase 0 (§9)
+lora_target_modules: null     # [VERIFY] with MoE, Phase 0
+num_frames: null              # T7: fixed in Phase 0
+audio_window_s: null
+image_size: null
+licence: Apache-2.0

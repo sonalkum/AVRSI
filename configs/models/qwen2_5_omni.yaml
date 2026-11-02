@@ -1,0 +1,11 @@
+backend: qwen2_5_omni
+model_id: Qwen/Qwen2.5-Omni-7B  # hub org [VERIFY]
+dtype: bf16
+transformers: {source: release, commit: null}
+audio_in_video_flag: use_audio_in_video
+missing_modality_fill: null
+lora_target_modules: null
+num_frames: null
+audio_window_s: null
+image_size: null
+licence: Apache-2.0

@@ -1,0 +1,102 @@
+# PLAN §3.7, §5.3, §8. arms hold only the changes from A8.
+defaults:
+  K: 4
+  B: 8
+  p: 0.3
+  T: 200
+  T_max: 6400
+  lam: 1.0
+  alpha: 1.0
+  gamma: 1.0
+  beta: 0.01
+  lr: 1.0e-5
+  lora_r: 32
+  max_new_tokens: 512
+  dev_every: 400
+  pair_orders: single   # single | both | none
+  check_view: isolated  # isolated | joint | none
+  critic: self          # self | gemini | lalm | none
+  guard: xm_guard       # xm_guard | minibatch | none
+  guard_view: isolated  # isolated | joint | none
+  reward: avrsi         # avrsi | rl_comm
+  trained: true
+  retired: false
+  t_sweep: false
+
+sampling:
+  rollout: {temperature: 1.0, top_p: 1.0, do_sample: true}
+  greedy: {temperature: 0.0, top_p: 1.0, do_sample: false}  # critic, eval, guard
+  # Not in PLAN: critics need a cap; 256 covers one line per sentence of a 512-token path.
+  critic_max_new_tokens: 256
+  auroc_sampled_passes: 4  # §9: the one sampled critic use
+
+arms:
+  A0: {trained: false, critic: none, pair_orders: none, check_view: none, guard: none, guard_view: none}
+  A1: {alpha: 0.0, gamma: 0.0, critic: none, pair_orders: none, check_view: none, guard: none, guard_view: none}
+  A2: {gamma: 0.0, check_view: none, guard_view: joint}
+  A3: {critic: gemini, check_view: joint, guard: none, guard_view: none}
+  A4: {critic: gemini, guard: none, guard_view: none}
+  A5: {T: null, guard: none, guard_view: none}
+  A6: {alpha: 0.0, pair_orders: none}
+  A7: {reward: rl_comm, alpha: 0.0, gamma: 0.0, critic: lalm, pair_orders: none, check_view: none, guard: none, guard_view: none}
+  A8: {}
+  A9: {pair_orders: both}
+  A10: {guard: minibatch, guard_view: none}
+  A11: {K: 8}
+  A12: {p: 0.0}
+  A13: {retired: true}
+  A14: {t_sweep: true}
+  A15: {check_view: joint, guard_view: joint}
+
+a7:
+  lalm: audio-flamingo-3             # appendix
+  embedding: Qwen3-Embedding-0.6B    # appendix
+
+tuning:
+  alpha: [0.5, 1.0]
+  gamma: [0.5, 1.0, 2.0]
+  p: [0.0, 0.3]
+  T: [100, 200, 500]
+  steps: 1600
+  min_gain: 0.01
+
+run_matrix:
+  primary_backbone: qwen3_omni
+  full: {A1: 3, A2: 3, A5: 3, A8: 3, A15: 3, A3: 1, A4: 1, A6: 1, A7: 1, A9: 1, A10: 1, A11: 1, A12: 1, A14: 1}
+  cross_backbone: {A1: 3, A2: 3, A8: 3, A15: 3}
+  evaluation_only: [A0]
+  pilot: {arms: [A1, A8], steps: 1600}
+
+xm:
+  sizes: {train: 20000, guard: 1024, dev: 512, gate: 500, test: 5000}
+  family_shares: {F1: 0.35, F2: 0.35, F3: 0.15, F4: 0.15}
+  silence_share_of_f1: 0.2
+  planted_guard: 256
+  planted_gate: 500
+  similarity_tier: 0.5       # appendix: bottom 50% of pair similarity
+  siglip_min_precision: 0.9
+  human_error_max: 0.05
+
+judges:
+  gemini:
+    provider: gemini
+    base_url: https://generativelanguage.googleapis.com/v1beta
+    model: gemini-3.8-flash   # worked for text; strongest video model [VERIFY]
+    key_env: GEMINI_API_KEY
+    key_file: ~/.gemini_key
+    cache_dir: cache/judges
+    max_calls: 1000
+    max_usd: 50.0
+    usd_per_call: null        # pricing [VERIFY]; while null only max_calls is enforced
+    timeout_s: 120
+  openai:
+    provider: openai
+    base_url: https://api.openai.com/v1
+    model: null               # current video support [VERIFY]; set before Phase 5
+    key_env: OPENAI_API_KEY
+    key_file: null
+    cache_dir: cache/judges
+    max_calls: 1000
+    max_usd: 50.0
+    usd_per_call: null
+    timeout_s: 120
