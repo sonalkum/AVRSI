@@ -1,6 +1,6 @@
 # AVRSI: Recursively Self-Improving Audio-Visual Reasoners with Cross-Modal Checking
 
-Status: plan rev 3.1, 2026-11-02. Facts carry a source. Anything marked **[VERIFY]** was not confirmed
+Status: plan rev 3.2, 2026-11-02. Facts carry a source. Anything marked **[VERIFY]** was not confirmed
 and must be resolved in Phase 0 before code depends on it.
 
 ## 0. Summary
@@ -67,7 +67,7 @@ H1 and H5 decide whether there is a paper. H2-H4 explain why. Decision rules are
 <answer>...</answer>
 ```
 
-SFFL shows separated traces can be learned by GRPO. Format is enforced by reward only. Optional
+SFFL shows separated traces can be learned by GRPO. No constrained decoding: format is rewarded, not forced. The prompt states it (see the appendix). Optional
 timestamps (`[12.3s]`) follow TAVIT and are off by default.
 
 ### 3.2 Critic views
@@ -632,7 +632,22 @@ AVQA mn.cs.tsinghua.edu.cn/avqa · Transformers docs qwen3_omni_moe.
 - If A3/A4 are shortened, the matched A8 runs one seed, same as A3/A4.
 - XM-Gate question text follows the F1 and F2 templates only, since planted claims test presence.
 - If fewer than 20% of θ_0 paths pass ValidFormat, planted base paths are assembled from the backbone's own
-  `<audio>` and `<visual>` sentences on a format-prompted rollout, and the θ_0 reference for guard condition 1
+  `<audio>` and `<visual>` sentences from a rollout with one exemplar added to the frozen actor prompt, used for
+  planted-base generation only. `<fusion>` and `<answer>` come from that same rollout. The θ_0 reference for guard condition 1
   uses the fallback extractor. Report this per backbone.
 - Guard condition 2 has n=256, so SE stays 1.4-2.8 points. The 0.02 margin is deliberately lenient: this
   condition blocks gross leniency, not small drift. The 0.05 θ_0 alarm covers slow drift.
+- **Actor prompt.** One frozen prompt states the four-tag format and is used by every arm, A0, θ_0 rollouts and
+  evaluation. It is frozen on XM-Dev before Phase 0b step 6. This overrides any reading that normal rollouts
+  have no format instruction.
+- Precedence notes: the θ_0 fallback above is the one exception to "the guard never uses the fallback
+  extractor". Template shares hold in every split except XM-Gate and the planted XM-Guard items, which use F1/F2.
+  The ValidFormat rule for base paths gives way to the 20% rule above.
+- Critic prompts and the actor prompt are iterated between Phases 0b and 1 on planted XM-Dev items.
+- A7: LALM = Audio Flamingo 3, embedding = Qwen3 Embedding-0.6B. Outcome is counted more than once by
+  design; this arm is "inspired", not a reproduction.
+- Gate 0 H2: also report each view's control supported rate, so abstention cannot pass as detection. The order
+  consistency row is the mean over A and V where applicable. Probes run on XM-Gate.
+- §0's A2 comparison is descriptive. The tests are H3 and H3b.
+- Defaults: similarity tier = bottom 50% of pair similarity; silence clips excluded from planted items; a SigLIP
+  class under 0.9 precision is excluded; XM-Test bootstrap cluster is the connected component of reused clips.
