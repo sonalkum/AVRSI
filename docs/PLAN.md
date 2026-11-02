@@ -1,6 +1,6 @@
 # AVRSI: Recursively Self-Improving Audio-Visual Reasoners with Cross-Modal Checking
 
-Status: plan rev 2, 2026-11-02. Facts carry a source. Anything marked **[VERIFY]** was not confirmed
+Status: plan rev 3, 2026-11-02. Facts carry a source. Anything marked **[VERIFY]** was not confirmed
 and must be resolved in Phase 0 before code depends on it.
 
 ## 0. Summary
@@ -17,11 +17,12 @@ and the argument as a whole by a critic with both. The same model plays every ro
 
 **Claim to test.** Recursive self-critique with modality-isolated checking improves cross-modal
 robustness more than (a) outcome-only GRPO, (b) a joint critic, both with the same claim-level scoring
-(A15) and as a straight AudioRSI port (A2), on every backbone that passes Gate 0, and (c) a frozen self or
+(A15) and as a straight AudioRSI port (A2), on each Gate-0-passing backbone, and (c) a frozen self or
 external critic, on Qwen3-Omni only.
 
-**Stop rule.** If fewer than two backbones pass Gate 0 (§9), the critic cannot reliably detect planted
-cross-modal errors, and the recursion has nothing to build on. Do not train.
+**Stop rule.** Gate 0 (§9) requires both detection of planted cross-modal errors and a measured isolation
+benefit over a joint critic, so a backbone with a good joint critic also fails. If fewer than two backbones
+pass, isolated checking has not earned its place and the recursion has nothing to build on. Do not train.
 
 ## 1. Why this is new
 
@@ -42,14 +43,16 @@ dominance. SVHalluc (2606.02642) reports open models often near chance on speech
 ## 2. Hypotheses
 
 - **H1 (primary).** Full AVRSI beats outcome-only GRPO (A8 vs A1) on the primary robustness endpoint (§7.1)
-  on every backbone that passes Gate 0.
+  on each Gate-0-passing backbone.
 - **H2 (mechanism).** Isolated critic views detect planted cross-modal errors better than a joint critic.
   Tested in Gate 0 only.
-- **H3 (isolation, the core claim).** A8 beats A15: same claim-level scoring, isolated vs joint critic.
-- **H3b (claim-level scoring).** A15 beats A2.
+- **H3 (isolation, the core claim).** A8 beats A15 on each Gate-0-passing backbone: same claim-level scoring,
+  isolated vs joint critic.
+- **H3b (claim-level scoring).** A15 beats A2 on each Gate-0-passing backbone.
 - **H4 (recursion matters).** On Qwen3-Omni, at the final checkpoint, A8 beats A5 (frozen self), A4 (frozen
   external isolated), and A3 (frozen external joint).
-- **H5 (no general cost).** General AV-QA accuracy does not fall, A8 vs A1 (non-inferiority margin 1 point).
+- **H5 (no general cost).** General AV-QA accuracy does not fall on each Gate-0-passing backbone, A8 vs A1
+  (non-inferiority margin 1 point).
 
 H1 and H5 decide whether there is a paper. H2-H4 explain why. Decision rules are in §7.4.
 
@@ -69,8 +72,9 @@ timestamps (`[12.3s]`) follow TAVIT and are off by default.
 
 ### 3.2 Critic views
 
-Same weights θ_c, four inputs. A8 uses A-check, V-check, and AV-pair; J-check is used by A15, A3, and
-Gate 0. "Withheld" means the modality is removed from the model input, not masked in text.
+Same weights θ_c, four inputs. A8 uses A-check, V-check, and AV-pair; J-check is used by A15, A3, A2's guard
+(§8), and Gate 0. "Withheld" means the modality is removed from the model input, not masked in text. A backbone
+that cannot accept a missing modality uses its Phase 0 fill (§9) here too; the fill carries no signal.
 
 | View | Input | Judges | Output |
 |---|---|---|---|
@@ -82,6 +86,7 @@ Gate 0. "Withheld" means the modality is removed from the model input, not maske
 Verdict schema, per sentence: `supported | unsupported | unverifiable | vacuous`.
 
 Critic prompts live in `avrsi/critic.py`. Candidates are anonymised, and A/B order is randomised per pair.
+Prompts may be iterated on XM-Dev only and are frozen before Gate 0, with no iteration after a Gate 0 failure.
 
 ### 3.3 Reward
 
@@ -97,21 +102,29 @@ S_m(k)     = min(1, U_m/N) × supported_m / n_m                     (N=3)
 
 n_m = all sentences in segment m after dedupe. U_m = unique supported sentences. Since dedupe runs first,
 U_m = supported_m. Unverifiable and vacuous sentences count in n_m but not as supported. n_m = 0 gives
-S_m = 0.
+S_m = 0. Silence items use N=1 in S_A, from item metadata.
 
 Rules:
 
-- **Splitter.** Strip timestamps, then split on `[.!?]` followed by whitespace. Deterministic.
-- **Dedupe.** On normalised text, drop a sentence if token Jaccard ≥ 0.8 with an earlier one or with the
-  question text. Critics see the deduped sentences.
-- **ValidFormat.** Exactly one each of audio, visual, fusion, answer tags, in that order; audio and visual
-  non-empty; fusion ≤ 2 sentences. R_format is the indicator of ValidFormat.
-- **R_outcome.** Indicator after normalising. MCQ maps a letter or the option text; Yes/No is normalised.
-  No extractable answer scores 0.
+- **ValidFormat.** Runs on raw text, before dedupe. Exactly one each of audio, visual, fusion, answer tags, in
+  that order; no non-whitespace outside tags; audio and visual non-empty; fusion ≤ 2 sentences. R_format is the
+  indicator of ValidFormat.
+- **Splitter.** Strip timestamps, then split on `[.!?]` followed by whitespace. Deterministic. Zero-token
+  sentences are dropped.
+- **Token normalisation.** Lowercase, strip punctuation, split on whitespace.
+- **Dedupe.** Per segment, on normalised tokens. Drop a sentence if token Jaccard ≥ 0.8 with an earlier one in
+  the segment or, on non-XM items only, with the question text. Question text excludes MCQ options. Honest XM
+  claims echo the templates, so a question rule there would drop true claims and tilt to No. Critics see the
+  deduped sentences.
+- **R_outcome.** Indicator after normalising. MCQ maps a letter or the option text; Yes/No is normalised. The
+  answer comes only from the single `<answer>` of a well-formed output, otherwise R_outcome = 0. Evaluation
+  needs A0 scored, so it uses one documented fallback extractor on outputs with no well-formed `<answer>`, the
+  same for all systems. Training reward and the guard never use it.
 - **Malformed paths** get no critic passes: R_xm = 0, and they lose every pair (r = 0 for them, 1 for the
   opponent). If both are malformed, tie.
 - **Pair symmetry.** r(j vs k) = 1 − r(k vs j). An AV-pair parse failure is a tie.
-- **Check failures.** A check parse failure or sentence-count mismatch makes the whole segment unverifiable.
+- **Check failures.** In the reward, a check parse failure or sentence-count mismatch makes the whole segment
+  unverifiable. Gate 0 and the guard exclude these instead (§9).
 - **Fusion.** At most 2 sentences, and it must not introduce new perceptual claims. It is scored by AV-pair.
   Gate 0 probes fusion laundering and vacuous truth.
 - **Length.** max_new_tokens = 512, hard cap (T3).
@@ -123,9 +136,9 @@ Degenerate policies considered:
 |---|---|
 | Wrong-modality padding ("a dog is visible" inside `<audio>`) | A-check returns unverifiable, which counts in n_m |
 | Vacuous truth | Vacuous verdict counts in n_m, not as supported |
-| Fusion laundering (moving unverifiable claims into `<fusion>`) | Fusion ≤ 2 sentences, no new perceptual claims, AV-pair; Gate 0 probe |
-| Duplication | Dedupe; U_m counts unique sentences |
-| Question echo | Dedupe against the question text |
+| Fusion laundering (moving unverifiable claims into `<fusion>`) | Partially blocked by the ≤ 2 sentence cap and AV-pair. Fusion token share logged (§7.3); Gate 0 probe |
+| Duplication | Near-exact copies only: dedupe; U_m counts unique sentences. Paraphrases pass dedupe; Gate 0 paraphrase probe |
+| Question echo | Dedupe against the question text, non-XM items only (see Dedupe) |
 
 R_pair rewards informativeness and logic. R_xm rewards truthfulness. Neither alone is sufficient: R_xm can
 be gamed by saying little, which min(1, U_m/N) limits, and R_pair by sounding good.
@@ -145,30 +158,35 @@ SFFL uses:
 | True AudioRSI at K=4, both orders, for comparison | 12 |
 
 These are maxima, as malformed paths get no passes. A8 costs up to 14 × 8 × 6,400 = 716,800 self-critic
-passes per run. Ablation A9 tests whether unordered pairs lose information compared with both orders.
+passes per run. Ablation A9 tests whether unordered pairs lose information compared with both orders. A11 at
+K=8 costs 28 AV-pair + 16 checks = 44 passes per question, 44 × 8 × 6,400 = 2,252,800 per run. Guard passes are
+counted in §6.
 
 ### 3.5 Recursion and guard
 
 Every T steps (default T=200; tuned over {100, 200, 500}), run the guard, then maybe `θ_c ← θ`.
 
 AudioRSI guards on one training mini-batch, which is noisy. AVRSI guards on a fixed set **XM-Guard**
-(1,024 items, §5.2, used only here). The handoff happens if and only if the actor has both
+(1,024 clips, §5.2, used only here). The handoff happens if and only if the actor has both
 
 1. outcome accuracy ≥ incumbent − 0.02, and
-2. planted-error balanced accuracy ≥ incumbent − 0.02, as the mean of A-check and V-check, on a frozen
-   planted-path set inside XM-Guard.
+2. planted-error balanced accuracy ≥ incumbent − 0.02, as the mean of A-check and V-check, on the frozen
+   256-path planted set inside XM-Guard (§9).
 
-Why this size and margin: at 256 items the paired SE is 1.4-2.8 points, against an expected gain under 0.4
-points per period, and a non-strict test on that noise ratchets.
+Why this size and margin: the paired SE is 0.70-1.40 points at n=1,024 (condition 1) and 1.4-2.8 points at
+n=256 (condition 2), against an expected gain under 0.4 points per period, and a non-strict test on that noise
+ratchets.
 
 Condition 2 stops a good answerer that has become a lenient judge from taking the role. Every guard
-decision is logged, with an alarm if the block rate exceeds 25%. Ablation A10 restores the AudioRSI
-mini-batch guard.
+decision is logged, with an alarm if the block rate exceeds 25%. The −0.02 margin is relative to a moving
+incumbent, so also log and alarm if the actor falls more than 0.05 below the reference of θ_0, the untrained policy, on
+either condition.
+Ablation A10 restores the AudioRSI mini-batch guard.
 
 ### 3.6 Counterfactual training data (optional, on by default)
 
 Each batch slot is drawn from **XM-Train** (§5.2) with Bernoulli probability p=0.3, otherwise from natural
-training data. XM-Train holds swapped clips whose answer is known by construction.
+training data. XM-Train holds swapped, silence, and aligned items whose answer is known by construction.
 This puts conflict into training, where naturally aligned video would let a visual shortcut pass.
 
 ### 3.7 GRPO
@@ -179,6 +197,7 @@ This puts conflict into training, where naturally aligned video would let a visu
 | Updates | One per batch |
 | Clipping | None. AudioRSI writes a clipped objective, but Ke-Omni-R has no clipping, and with one update the ratio is 1, so clipping is inert. ε is not implemented |
 | Baseline | Group mean, no std normalisation |
+| Sampling | Train rollouts temperature 1.0, top_p 1.0; critic, eval, and guard deterministic greedy. Set in config |
 | KL | To the initial policy, β=0.01, per-token |
 | lr | 1e-5 |
 | LoRA | r=32 (our choice, not from a paper); target modules resolved in Phase 0 |
@@ -189,7 +208,7 @@ AudioRSI's K=8 is ablation A11.
 
 ## 4. Backbones
 
-All three train with the same reward code through `avrsi/models/`, subject to the Phase 0 backward test.
+All three train with the same reward code through `avrsi/models/`, subject to the Phase 0 backward test and Gate 0.
 
 | Model | Why | Facts | Open issues |
 |---|---|---|---|
@@ -210,7 +229,7 @@ compares within-backbone deltas: AVRSI's gain is larger there. Report it either 
 ## 5. Datasets
 
 Verify download, licence, and splits in Phase 0 for each set not already confirmed below. Videos must
-retain audio.
+retain audio, except CMM (§5.4).
 
 ### 5.1 Natural training
 
@@ -224,38 +243,52 @@ retain audio.
 VGGSound is the primary source.
 
 - **Audio label:** the VGGSound class.
-- **Visual label:** SigLIP zero-shot verification of the class above a threshold, calibrated on a human
-  sample of 300. Accept only if precision ≥ 0.9.
+- **Visual label:** SigLIP zero-shot verification of the class, scored as the max over 8 uniform frames,
+  above a threshold. A "No" visual truth also needs a low score on the partner class. The threshold is
+  calibrated on a human sample of 300; precision is measured on a separate human sample of 300; both stay
+  outside XM-Test. Accept only if precision ≥ 0.9. Many VGGSound classes are non-visual, so expect class loss.
+
+Templates. Shares hold in every split that has questions.
+
+| Family | Template | Share | Classes | Yes/No balance | Twin rule | follows_A | follows_V |
+|---|---|---|---|---|---|---|---|
+| F1 audio presence | "Is there a sound of {class}?" | 35% | Yes/No | 50/50 | Aligned twin: same template, question, source clip | Answer by audio label | Answer by visual label |
+| F2 visual presence | "Can you see {class}?" | 35% | Yes/No | 50/50 | Same | Answer by audio label | Answer by visual label |
+| F3 AV match | "Does what you hear match what you see?" | 15% | Yes/No | 50/50 | Same | null | null |
+| F4 attribution MCQ | "Where is {class} present?" Options: audio, video, both, neither | 15% | Option roles: correct audio, correct visual, both, neither; shuffled in presentation | n/a; roles 25% each | Same | Audio if the class is heard, else neither | Visual if the class is seen, else neither |
+
+null = excluded from the Modality Dominance Index (§7.2). Aligned items have no conflict and are also excluded.
+
+**Balanced accuracy on XM** = mean over families of that family's mean recall over canonical classes (Yes/No,
+or the option roles for F4).
 
 Construction, for clips (v_A, a_A) and (v_B, a_B):
 
-- **Audio-swap** (v_A, a_B), as ACPO. Ask "Is there a sound of {class in A only}?" → No; "...{class in B
-  only}?" → Yes.
-- **Video-swap** (v_B, a_A). Same with visual questions. ACPO has no such direction. Ground truth rests on
-  the SigLIP-verified visual label.
-- **Silence:** replace the whole audio track with silence. Visually present, audio-absent. This is
-  "silence"; no equivalence to AV-ConfuseBench is claimed.
-- **Conflict MCQ**: which modality shows X, or does what you hear match what you see.
+- **Audio-swap** (v_A, a_B), as ACPO. F1: "...{class in A only}?" → No; "...{class in B only}?" → Yes.
+- **Video-swap** (v_B, a_A). Same with F2. ACPO has no such direction. Ground truth rests on the
+  SigLIP-verified visual label.
+- **Silence:** replace the whole audio track with silence. Visually present, audio-absent. Audio presence
+  only, within F1; its share of F1 is set in Phase 0b. This is "silence"; no equivalence to AV-ConfuseBench is
+  claimed.
+- **Conflict:** F3 and F4 on swapped clips.
 - **Aligned control** (v_A, a_A), same templates, ~50% of data. Without it "No" wins by default.
 
-Audio-swap and video-swap have equal shares. Every aligned/swapped pair stores a `twin_id`, with the same
-template, question, and clip. Each template declares its `follows_A` and `follows_V` answers, used by the
-Modality Dominance Index (§7.2).
+Audio-swap (with silence) and video-swap have equal shares. Every aligned/swapped pair stores a `twin_id`.
 
-Controls: exclude semantically close class pairs (use CLAP/SigLIP similarity tiers, as ACPO uses tiers),
-balance Yes/No within each template, and require unimodal solvability by label.
+Controls: exclude semantically close class pairs (use CLAP/SigLIP similarity tiers, as ACPO uses tiers); pairs
+that remain are the label-disjoint tier. Require unimodal solvability by label.
 
 | Split | Size | Use |
 |---|---|---|
 | XM-Train | 20k | Training only (§3.6) |
-| XM-Guard | 1,024 items | Handoff only (§3.5) |
-| XM-Dev | 512 items | Tuning, dev checkpoints, pilot, power (§5.3) |
+| XM-Guard | 1,024 clips, one item each; 256 carry the planted set (§9) | Handoff only (§3.5) |
+| XM-Dev | 512 items | Tuning, dev checkpoints, pilot, power (§5.3); critic prompts (§3.2); T8 probes |
 | XM-Gate | 500 clips | Gate 0 only (§9) |
 | XM-Test | 5k | Final evaluation (§5.4) |
 
 All XM source clips are disjoint from AVQA training videos and from each other at source-video level.
 
-XM-Test is frozen and hashed before the pilot. Before freezing, humans check 500 items; rebuild if the error
+XM-Test is frozen and hashed in Phase 0b (§9). Before freezing, humans check 500 items; rebuild if the error
 exceeds 5%; publish the error rate. It is never edited after freezing.
 
 ### 5.3 Dev and tuning
@@ -264,7 +297,8 @@ XM-Dev tunes α, γ, T, p. Benchmarks are never used for selection. AudioRSI tun
 is a known weakness to avoid.
 
 Tuning runs on Qwen3-Omni, before Phase 3, in 1,600-step runs. The selection metric is balanced accuracy on
-XM-Dev. It is one-factor-at-a-time from the defaults (α=1, γ=1, T=200, p=0.3):
+XM-Dev at the final checkpoint; ties or gains under 1 point keep the default. It is one-factor-at-a-time from
+the defaults (α=1, γ=1, T=200, p=0.3):
 
 | Parameter | Grid |
 |---|---|
@@ -281,7 +315,7 @@ Dev checkpoints every 400 steps are scored on XM-Dev only.
 
 | Tier | Benchmark | Facts | Role |
 |---|---|---|---|
-| Primary | **CMM** | 1,200 samples, 2,400 questions, Yes/No 50/50; six subcategories of 200 samples each (§7.1); Perception Accuracy + Hallucination Resistance; MIT licence; HF `DAMO-NLP-SG/CMM` | Primary |
+| Primary | **CMM** | 1,200 samples, 2,400 questions, Yes/No 50/50; six subcategories of 200 samples each (§7.1); Perception Accuracy + Hallucination Resistance; MIT licence; HF `DAMO-NLP-SG/CMM` | Primary. Fed with exactly the modalities each sample contains, same for all systems |
 | Primary | **AVHBench** | About 5-5.8k QA, public subset size unconfirmed; Yes/No; tasks A→V, V→A, Matching, Captioning; public release is a **subset**, via Google Drive; leaderboard reports Yes%; videos from VALOR and AudioCaps | Primary. Critique in 2604.02605: often solvable from one modality, so report a unimodal baseline next to it |
 | Primary | **XM-Test** | ours | Primary, published |
 | Secondary | **AV-ConfuseBench** | 39 videos/73 QAs and 20 videos/100 QAs; videos separate; github.com/rikeilong/AudioVisual_Confusion | Audio absence |
@@ -292,19 +326,21 @@ Dev checkpoints every 400 steps are scored on XM-Dev only.
 | General | **AVQA test, Valor32k-AVQA v2.0** | Used by SFFL (~30k videos, 200k+ QA for Valor2) | H5; context for SFFL, RL-CoMM |
 | General | **MUSIC-AVQA** | Used by SFFL, RL-CoMM | Reported, outside the H5 mean |
 | Long | **MMOU** | AVF-Think 60.2 | Optional, at 15 min |
+| Sanity | **MMAU test-mini** | Qwen2.5-Omni 65.2% in AudioRSI | Phase 0 sanity check only, untrained model |
 
-Benchmarks are evaluated at T_max only, with no checkpoint selection.
+Benchmarks other than the sanity row are evaluated at T_max only, with no checkpoint selection.
 
 Leakage: hash clips and YouTube IDs across all train and eval sets. AVHBench draws on VALOR and AudioCaps;
 AVQA and VGGSound overlap with some, and AVQA is built from VGGSound. Apply the overlap filter to all XM
-splits and AVQA, and report what is dropped.
+splits and AVQA in Phase 0b, and report what is dropped. A benchmark that arrives later is filtered on its own
+side, never by editing XM-Test.
 
 ## 6. Judges and critics
 
 | Name | Model | Used in training? | Role |
 |---|---|---|---|
 | Self AV-pair, A-check, V-check | the policy, θ_c | **Yes** | Default |
-| Self J-check | the policy, θ_c | Only in A15 | Tests H2 (Gate 0), H3 |
+| Self J-check | the policy, θ_c | Only in A15 and A2's guard | Tests H2 (Gate 0), H3 |
 | External frozen judge | Gemini (video + audio) | Only in A3 | Replaces all self views: AV-pair and J-check. Tests H4 |
 | External judge, isolated | Gemini; one modality removed for A/V-check | Only in A4 | Replaces all self views: AV-pair, A-check, V-check. Tests H4 |
 | Gate 0 reference | Gemini, all views | Never | Upper-reference arm, Gate 0 only |
@@ -330,11 +366,19 @@ Volume, for budgeting:
 | Item | Calls |
 |---|---|
 | A8 self-critic | 14 passes × 8 × 6,400 = 716,800 per run (local) |
-| A3, A4 Gemini | 716,800 per run each, if each replaces all views at A8's pass counts |
+| A11 self-critic | 44 passes × 8 × 6,400 = 2,252,800 per run (local) |
+| A3, A4 Gemini | 716,800 per run each, if each replaces all views at A8's pass counts; 179,200 at 1,600 steps |
+| Guard, per handoff check | 1,024 actor generations (condition 1) + 256 check passes (condition 2, planted segment only) + 512 AV-pair passes (order consistency) = 1,792 (local). Incumbent scores are reused from its own check |
+| Guard, per run at T=200 | 33 checks including θ_0's reference × 1,792 = 59,136 (local), or 775,936 with A8's 716,800 |
 | Full audit | 3 backbones × ~6 systems × ~1k items × 2 judges × 3 seeds ≈ 108k, an upper bound as only main systems have 3 seeds |
 
 If pricing makes A3/A4 unaffordable, shorten A3, A4, and a matched A8 to 1,600 steps with the same schedule,
 and compare A3 and A4 to that matched A8 in H4. Never subsample steps.
+
+Runs: 25 training runs on Qwen3-Omni (§7.4) and 12 on each other Gate-0-passing backbone (A1, A2, A8, A15 × 3
+seeds), so 37 full runs if two backbones pass and 49 if three do. Add 9 short runs at one seed each: 2 pilot and
+7 tuning (the default plus 6 off-default values); shortening A3/A4 adds the matched A8. A0 is evaluation only.
+Compute is external to this plan.
 
 ## 7. Metrics
 
@@ -346,12 +390,12 @@ and compare A3 and A4 to that matched A8 in H4. Never subsample steps.
 |---|---|
 | CMM | (PA+HR)/2 over all 2,400 questions: Overreliance on Unimodal Priors (Language, Visual, Audio Dominance) and Spurious Inter-modality Correlations (Visual-Language, Audio-Language, Visual-Audio-Language). PA = correct "yes" / ground-truth "yes"; HR = correct "no" / ground-truth "no" |
 | AVHBench | Mean of A→V and V→A balanced accuracy |
-| XM-Test | Balanced accuracy |
+| XM-Test | Balanced accuracy on XM (§5.2) |
 
 Balanced accuracy is the mean recall over answer classes. It matters: AVHBench reports Yes%, and a model that
 says "No" more often gains accuracy without gaining perception.
 
-XRS is locked before the pilot.
+XRS and any Phase 0 fill for CMM are locked before the pilot.
 
 ### 7.2 Answer-level and reasoning-level
 
@@ -359,8 +403,8 @@ XRS is locked before the pilot.
 |---|---|
 | Accuracy, balanced accuracy, F1, Yes% | Per benchmark |
 | Swap Sensitivity | P(answer correct on both aligned and swapped twin), over twinned XM-Test items only. Penalises invariant models |
-| Modality Dominance Index | P(follows V \| conflict) − P(follows A \| conflict), from each template's `follows_V`/`follows_A` answers. 0 is balanced |
-| Hallucinated Claim Rate | Unsupported sentences / all, on `<audio>` and `<visual>`, by audit judges and humans |
+| Modality Dominance Index | P(follows V \| conflict) − P(follows A \| conflict), from each template's `follows_V`/`follows_A` answers (§5.2); null excluded. 0 is balanced |
+| Hallucinated Claim Rate | Unsupported sentences / all, on `<audio>`, `<visual>`, and `<fusion>`, by audit judges and humans |
 | Evidence Precision / Recall | Claims vs clip labels, where labels exist |
 | Attribution Accuracy | Claim placed in the right modality segment |
 | Audit preference | Blind judge win rate of AVRSI vs baselines |
@@ -370,32 +414,37 @@ XRS is locked before the pilot.
 
 | Metric | Why |
 |---|---|
-| Planted-error detection (AUROC, balanced accuracy) | Gate 0, and the guard. Take a correct path, then insert a false claim about a sound/sight absent from the clip. Scoring as in §9 |
+| Planted-error detection (AUROC, balanced accuracy) | Gate 0, and the guard. Planted paths and scoring as in §9 |
 | Human agreement, Cohen's kappa, ≥200 pairs (post-run) | AudioRSI's audit was four cases; ours is sized to report a coefficient |
 | Self-preference rate | Does the critic prefer its own style against a fixed reference? |
-| Order consistency | 1 − P(verdict flips when A/B swap) |
+| Order consistency | 1 − P(verdict flips when A/B swap), at guard time on the 256 planted paths vs their originals, both orders |
 | Tie rate, supported rate | Saturation: S_m → 1 means the critic has stopped discriminating |
+| Fusion token share | Training-time laundering metric: `<fusion>` tokens / all path tokens |
 | Guard block rate | Alarm above 25% (§3.5) |
+| Drift from θ_0 | Alarm if the actor falls more than 0.05 below θ_0's reference on either guard condition (§3.5) |
 | Reward–audit correlation (offline, post-run) | Does R_total predict audit quality within groups? Monitoring only; it does not affect training |
 
 ### 7.4 Statistics and decision rules
 
-Main systems A1, A2, A8, A15 run 3 seeds per backbone; all others run 1. Always report the seed range.
+Main systems A1, A2, A8, A15 run 3 seeds per Gate-0-passing backbone, and A5 also runs 3 seeds on Qwen3-Omni;
+all others run 1. Qwen3-Omni is therefore 25 training runs: 15 from those five systems, 8 from A3, A4, A6, A7,
+A9, A10, A11, A12, and 2 from A14. Always report the seed range.
 
-ΔXRS, per backbone: bootstrap items (10k, stratified by benchmark, paired across systems), averaging seeds.
-The bound is one-sided lower 95%.
+ΔXRS, per backbone: bootstrap clusters (10k, stratified by benchmark, paired across systems), averaging seeds.
+A cluster is a CMM sample, an XM source clip, or a twin pair; elsewhere it is the item. The bound is one-sided
+lower 95%.
 
 | Hypothesis | Contrast | Backbones | Pass |
 |---|---|---|---|
-| H1 | A8 − A1, ΔXRS | Every backbone that passed Gate 0 | Every lower bound > 0. Intersection-union, no Holm |
-| H2 | A/V-check vs J-check | All | Gate 0 only (§9) |
-| H3 | A8 − A15, ΔXRS | Each | Lower bound > 0, Holm |
-| H3b | A15 − A2, ΔXRS | Each | Lower bound > 0, Holm |
+| H1 | A8 − A1, ΔXRS | Each Gate-0-passing backbone | Every lower bound > 0. Intersection-union, no Holm |
+| H2 | A-check vs J-check on false-audio items | All | Gate 0 only (§9) |
+| H3 | A8 − A15, ΔXRS | Each Gate-0-passing backbone | Lower bound > 0, Holm |
+| H3b | A15 − A2, ΔXRS | Each Gate-0-passing backbone | Lower bound > 0, Holm |
 | H4 | A8 − A5, A8 − A4, A8 − A3, ΔXRS, final checkpoint | Qwen3-Omni | Lower bound > 0, Holm |
-| H5 | A8 − A1, mean accuracy over WorldSense, DailyOmni, OmniBench, Video-MME, AVQA test, Valor2 | Each | Lower bound > −1 point |
+| H5 | A8 − A1, mean accuracy over WorldSense, DailyOmni, OmniBench, Video-MME, AVQA test, Valor2 | Each Gate-0-passing backbone | Lower bound > −1 point |
 
-- Holm runs across H3, H3b, and H4 contrasts within a backbone: 5 on Qwen3-Omni, 2 elsewhere.
-- A5 has 3 seeds. A3, A4 have one seed for cost, so their H4 bounds carry item noise only for that arm.
+- Holm runs across H3, H3b, and H4 contrasts within a backbone: 5 on Qwen3-Omni, 2 on other Gate-0-passing backbones.
+- A3, A4 have one seed for cost, so their H4 bounds carry item noise only for that arm.
 - Per-benchmark results for H5 are secondary.
 - McNemar is used only for per-benchmark accuracy, as a secondary result.
 - Report effect sizes with CIs. AudioRSI's 1.5-point headline on 1,000 items shows why: unpaired, that gap
@@ -404,12 +453,13 @@ The bound is one-sided lower 95%.
 
 ## 8. Ablations and baselines
 
-Run on Qwen3-Omni in full. On AVF and Qwen2.5-Omni, run only A0, A1, A2, A8, A15.
+Run on Qwen3-Omni in full. On AVF and Qwen2.5-Omni, if they pass Gate 0, run only A0, A1, A2, A8, A15. A backbone
+that fails Gate 0 gets A0 only.
 
 **Rule.** Everything not named in a row equals A8: K=4, B=8, p=0.3, XM-Guard guard, output format,
 single-order unordered pairs. Tuned values (§5.3) replace defaults for every system. The XM-Guard test
 applies wherever a self-critic handoff exists. Condition 2 uses the arm's own checking view: A/V-check for A8
-and its variants, J-check for A2 and A15, so no isolation leaks into the H3 and H3b comparators. Systems with no handoff skip it (A0, A1, A3, A4, A5, A7, A13).
+and its variants, J-check for A2 and A15, so no isolation leaks into the H3 and H3b comparators. Systems with no handoff skip it (A0, A1, A3, A4, A5, A7).
 
 | ID | System | Changes from A8 | Tests |
 |---|---|---|---|
@@ -422,11 +472,11 @@ and its variants, J-check for A2 and A15, so no isolation leaks into the H3 and 
 | A6 | R_xm only | No R_pair | Is pair needed? |
 | A7 | RL-CoMM-inspired | LALM reference plus coherence scores replace R_pair, R_xm and R_format with r_format + r_arr + r_avc (format counted once); no warm-up SFT, no Ans-CO. Inspired by RL-CoMM, not a reproduction | Prior art |
 | A8 | **Full AVRSI** | None | H1, H3, H4, H5 |
-| A9 | Both A/B orders | AV-pair in both orders (20 passes) | §3.4 |
+| A9 | Both A/B orders | AV-pair in both orders (20 passes); r(k vs j) is the mean over both orders | §3.4 |
 | A10 | AudioRSI guard package | AudioRSI mini-batch outcome guard replaces the XM-Guard set and removes condition 2 | §3.5 |
-| A11 | K=8 | K=8 | Budget |
+| A11 | K=8 | K=8: 44 passes per question, 2,252,800 per run (§3.4) | Budget |
 | A12 | No XM-Train | p=0. If tuning selects p=0, A12 runs p=0.3 | §3.6 |
-| A13 | SFFL-reward | PEM + structure reward, two stages, trained on A8's data; no MAAM. Reward-only reimplementation | Closest competitor |
+| A13 | Retired | Not run. SFFL is compared via its published numbers where datasets match | n/a |
 | A14 | T sweep | The values of {100, 200, 500} not chosen for A8 | Recursion rate |
 | A15 | Joint claim-level critic | J-check replaces A-check and V-check; critic sees audio and video, same prompt and schema | H3 |
 
@@ -434,33 +484,68 @@ A15 matters: without it a reviewer can say the gain comes from claim-level scori
 modality removal; H3b isolates claim-level scoring.
 
 Published baselines to tabulate: Gemini, GPT audio/video models, AVF-Think, Qwen3-Omni, VideoLLaMA 2,
-video-SALMONN 2, SFFL and ACPO where released.
+video-SALMONN 2, SFFL (published numbers, where datasets match), and ACPO where released.
 
 ## 9. Phases and gates
 
 **Phase 0: verify.** Resolve every [VERIFY]. Run Qwen3-Omni, AVF, Qwen2.5-Omni inference on one clip in all
-four critic views. Confirm modality withholding really changes model inputs (a test, not an assumption). Run
-one backward step per backbone with LoRA and per-token KL; if AVF fails, apply the fallback in §4. Resolve
-LoRA target modules.
+four critic views, plus audio-only and video-only inference tests per backbone. If a backbone cannot accept a
+missing modality, it gets a black-frame video or a silent track, chosen here and locked with XRS. Confirm
+modality withholding really changes model inputs (a test, not an assumption). Run one backward step per
+backbone with LoRA and per-token KL; if AVF fails, apply the fallback in §4. Resolve LoRA target modules. Run
+MMAU test-mini as a sanity check reproducing Qwen2.5-Omni's baseline (AudioRSI's 65.2%).
 
-**Phase 1: Gate 0, no training.** Sample actor paths on XM-Gate. Plant errors: false audio claim, false visual
-claim, modality-swapped claim, correct control. Run AV-pair, A/V-check, and J-check on every backbone. A/V-check
-and J-check score the same planted items. Gemini runs as an upper-reference arm, here only, with no pass
-criterion.
+**Phase 0b: build XM.** In this order:
 
-Scoring:
+1. Download available benchmarks.
+2. Hash clip and YouTube IDs (§5.4).
+3. Calibrate SigLIP (§5.2).
+4. Split.
+5. Build XM-Gate, XM-Guard, XM-Dev, XM-Train, XM-Test.
+6. Build planted sets, per backbone.
+7. Human check (§5.2).
+8. Freeze and hash.
+
+A benchmark that arrives later is filtered on its own side, never by editing XM-Test.
+
+Planted paths on XM-Gate, 500 clips:
+
+| Type | Clips | Planted sentence | Segment |
+|---|---|---|---|
+| False-audio claim | 125 | False class | `<audio>` |
+| False-visual claim | 125 | False class | `<visual>` |
+| Modality-swapped claim | 125, swapped clips only | Something visible but not audible, and the mirror: audible but not visible | `<audio>` (63), `<visual>` (62) |
+| Control | 125 | True label sentence, so "supported rate on control" has ground truth | `<audio>` (63), `<visual>` (62) |
+
+Sentences are templated from labels using one shared style pool for true and false. The false class comes from
+the label-disjoint tier (§5.2). Insertion is at a uniformly random sentence position in a path sampled from θ_0
+at rollout settings (§3.7). Base paths must pass ValidFormat; a planted sentence that dedupe would remove is
+redrawn.
+
+Guard set: 256 paths in XM-Guard, 64 per type, built the same way from θ_0 per backbone and frozen. They count
+within XM-Guard's 1,024 clips.
+
+**Phase 1: Gate 0, no training.** Critic prompts are frozen before this phase, with no iteration after a failure
+(§3.2). Run AV-pair, A/V-check, and J-check on every backbone's planted XM-Gate set. A/V-check and J-check score
+the same planted items. Gemini runs as an upper-reference arm, here only, with no pass criterion.
+
+Scoring, shared with the guard:
 
 - **AUROC score:** log-probability of the verdict "unsupported" token for the planted sentence or, if
-  unavailable, the fraction of "unsupported" across 4 sampled passes.
-- **Detection:** a planted error counts as detected if the verdict is unsupported or unverifiable.
-- **Order consistency:** 1 − P(verdict flips).
+  unavailable, the fraction of "unsupported" across 4 sampled passes, the one sampled critic use (§3.7).
+- **Detection:** a planted error counts as detected if the verdict on the planted sentence is unsupported or
+  unverifiable. A-check detection covers errors planted in `<audio>`, V-check detection those in `<visual>`.
+- **Balanced accuracy,** per view: mean of detection and supported rate on control.
+- **Parse failures,** including sentence-count mismatch, are excluded from detection, and their rate is reported.
+- **AV-pair order consistency:** 1 − P(verdict flips), planted path vs its original, in both orders.
 
 | Gate 0 criterion, per backbone | Pass |
 |---|---|
-| A/V-check detection, balanced accuracy | ≥ 0.70 |
-| A/V-check vs J-check on audio errors | A/V-check better by ≥ 5 points (H2) |
-| Order consistency | ≥ 0.85 |
-| Supported rate on correct control | 0.6-0.95, not saturated |
+| A/V-check detection, mean of A-check and V-check detection | ≥ 0.70 |
+| A-check vs J-check on false-audio items only; modality-swapped items reported separately | A-check better by ≥ 5 points (H2) |
+| AV-pair order consistency | ≥ 0.85 |
+| Supported rate on control | 0.6-0.95, not saturated |
+| Parse failure rate, each view | ≤ 10% |
 
 Probes, reported per backbone:
 
@@ -469,20 +554,23 @@ Probes, reported per backbone:
 | Vacuous sentences | Does the check return vacuous, not supported? |
 | Fusion laundering | Does AV-pair reward new perceptual claims moved into `<fusion>`? |
 | Question-text leakage into A-check | Does a claim taken from the question pass the A-check without audio support? |
+| Paraphrase duplication | Does a paraphrase of a supported sentence, which passes dedupe, raise S_m? |
 
-A backbone failing Gate 0 is dropped from H1 and reported as such. Fewer than two pass → stop and report. If
-Qwen3-Omni fails, the full ablation programme (pilot, tuning, Phase 3, H4) moves to the passing backbone with the highest isolated detection. A
-pass on Gemini only means the idea needs an external critic, which is a different paper.
+A backbone failing Gate 0 is dropped from H1, H3, H3b, and H5, reported as such, and gets A0 only. Fewer than two
+pass → stop and report. If Qwen3-Omni fails, the full ablation programme (pilot, tuning, Phase 3, H4) moves to the
+passing backbone with the highest isolated detection, along with A5's 3 seeds. A pass on Gemini only means the
+idea needs an external critic, which is a different paper.
 
-**Phase 2: pilot.** Before it, lock XRS and freeze XM-Test. Qwen3-Omni, A1 vs A8, 1,600 steps, one seed, dev
-only: no benchmark and no XM-Test. Check: rewards are not constant, critic health stays out of saturation,
+**Phase 2: pilot.** Before it, lock XRS and any Phase 0 fill; XM-Test is already frozen. Qwen3-Omni, A1 vs A8,
+1,600 steps, one seed, dev only: no benchmark and no XM-Test. Check: rewards are not constant, critic health stays out of saturation,
 length stays bounded, and XM-Dev balanced accuracy moves. Estimate power from XM-Dev variance.
 
 **Phase 2b: tuning.** §5.3.
 
 **Phase 3: Full ablations** on Qwen3-Omni, 6,400 steps, seeds as in §7.4.
 
-**Phase 4: Cross-backbone** on AVF and Qwen2.5-Omni: A0, A1, A2, A8, A15.
+**Phase 4: Cross-backbone** on AVF and Qwen2.5-Omni, if they pass Gate 0: A0, A1, A2, A8, A15. Backbones that
+failed Gate 0 get A0 only.
 
 **Phase 5: Audit and write.** Human panel, audit judges, tables, paper.
 
@@ -490,14 +578,14 @@ length stays bounded, and XM-Dev balanced accuracy moves. Estimate power from XM
 
 | # | Trap | Control |
 |---|---|---|
-| T1 | Critic drift to leniency (S_m→1) | Guard condition 2; supported-rate alarm; block-rate alarm |
+| T1 | Critic drift to leniency (S_m→1) | Guard condition 2; supported-rate alarm; block-rate alarm; θ_0 drift alarm |
 | T2 | Collusion: actor learns phrases the critic likes | Offline post-run audit judges and reward–audit correlation |
 | T3 | Reasoning grows, or shrinks to game S_m | max_new_tokens 512, hard cap; min(1, U_m/N) with N=3; length tracked |
 | T4 | "No" bias from swapped data | 50% aligned controls; balanced accuracy; Yes% |
 | T5 | Unimodal A-check cannot verify speech-lip or AV-sync claims | `<fusion>` may relate claims already made in the segments, scored by AV-pair, but adds no new perceptual claim |
 | T6 | Label noise in swaps (a dog clip with barking in the background) | Label-disjoint pairs; SigLIP-verified visual labels; similarity tiers; human check of XM-Test |
 | T7 | Backends differ in frames and audio windows | Fix per-model settings; compare within a backbone, never across |
-| T8 | Silent modality failure (audio not decoded) | Input-assert tests; XM probes before each run |
+| T8 | Silent modality failure (audio not decoded) | Input-assert tests; XM-Dev probes before each run. CMM exempt (§5.4) |
 | T9 | Benchmark solvable unimodally | Report A-only and V-only baselines beside AV |
 | T10 | Reward gain is from format alone | A1 uses the same output format |
 | T11 | Selection on test | §5.3; §5.4 T_max only; XM-Test frozen and hashed |
@@ -508,19 +596,19 @@ length stays bounded, and XM-Dev balanced accuracy moves. Estimate power from XM
 
 ```
 docs/PLAN.md             this plan
-avrsi/parse.py           segment and sentence parsing, dedupe, format reward
+avrsi/parse.py           segment and sentence parsing, dedupe, format reward, fallback extractor
 avrsi/rewards.py         R_outcome, R_pair, R_xm, group advantages
 avrsi/critic.py          prompts, verdict parsing, critic views, budget planner
 avrsi/sync.py            periodic sync and guard
 avrsi/grpo.py            GRPO + per-token KL objective, no clipping
-avrsi/perturb.py         swap planning, twin_id, planted errors
+avrsi/perturb.py         templates, swap planning, twin_id, planted paths
 avrsi/metrics.py         §7 metrics
 avrsi/stats.py           paired bootstrap, intersection-union, Holm, McNemar
 avrsi/judges/            Gemini, OpenAI clients; cached; key handling
 avrsi/data/              benchmark adapters
 avrsi/models/            backend interface; Qwen3-Omni, Qwen2.5-Omni, AVF; fake backend
 avrsi/train.py           training loop
-scripts/                 Gate 0, eval, audit
+scripts/                 XM build, Gate 0, eval, audit
 configs/                 per-model and per-ablation config
 tests/                   runs on the fake backend, no GPU
 ```
