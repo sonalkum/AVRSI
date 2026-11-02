@@ -162,3 +162,15 @@ def test_decide_full():
     assert decide({"a": ok, "b": ok})["H1"] and decide({"a": ok, "b": ok})["H5"]
     assert not decide({"a": ok, "b": bad})["H1"] and not decide({"a": ok, "b": bad})["H5"]
     assert decide({"a": ok})["per_backbone"]["a"] == {"H3": True, "H3b": True}
+
+
+def test_lower_bound_is_the_one_sided_quantile():
+    a = np.array([[1, 1, 0, 1, 1, 0, 1, 1, 1, 0] * 3], float)
+    b = np.array([[1, 0, 0, 1, 0, 0, 1, 0, 1, 0] * 3], float)
+    n = a.shape[1]
+    term = accuracy_term(None, n)
+    B = 400
+    rng = np.random.default_rng(3)
+    boot = [a[0][p].mean() - b[0][p].mean() for p in (rng.integers(n, size=n) for _ in range(B))]
+    out = paired_delta_bootstrap({"t": term}, {"t": a}, {"t": b}, B=B, seed=3)
+    assert out["lower"] == pytest.approx(float(np.quantile(boot, 0.05)))

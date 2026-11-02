@@ -1,8 +1,11 @@
+import json
 from dataclasses import asdict
 
 import pytest
 
-from avrsi.config import backbone_arms, expand_arm, load_experiment, load_model, resolve_arm, short_runs, training_runs, tuning_values
+from avrsi.config import (backbone_arms, expand_arm, load_experiment, load_model, resolve_arm, select_arm, select_tuned, short_runs, training_runs,
+                          tuning_values)
+from avrsi.config import main as config_main
 
 A8 = asdict(resolve_arm("A8"))
 NO_HANDOFF = {"guard": "none", "guard_view": "none"}
@@ -47,7 +50,7 @@ def test_a8_defaults_match_plan():
 
 def test_sampling_config():
     s = load_experiment()["sampling"]
-    assert s["rollout"] == {"temperature": 1.0, "top_p": 1.0, "do_sample": True}
+    assert s["rollout"] == {"temperature": 1.0, "top_p": 1.0, "do_sample": True, "top_k": 0, "repetition_penalty": 1.0}
     assert s["greedy"]["do_sample"] is False and s["auroc_sampled_passes"] == 4
 
 
@@ -111,3 +114,70 @@ def test_avf_settings():
     assert (config["image_size"], config["audio_window_s"]) == (448, 30) and "Noncommercial" in config["licence"]
 
 
+
+
+def test_a14_T_list_excludes_the_tuned_T():
+    assert [a.T for a in expand_arm("A14", {"T": 100})] == [200, 500]
+    runs = [arm.T for arm, _ in training_runs("qwen3_omni", True, tuned={"T": 500}) if arm.id == "A14"]
+    assert runs == [100, 200]
+    a8 = {arm.T for arm, _ in training_runs("qwen3_omni", True, tuned={"T": 500}) if arm.id == "A8"}
+    assert a8 == {500}
+
+
+def test_select_arm_rules():
+    assert select_arm("A14", {"T": 100}, 500).T == 500
+    assert select_arm("A8").id == "A8"
+    with pytest.raises(ValueError, match="needs --T"):
+        select_arm("A14")
+    with pytest.raises(ValueError, match="T=200"):
+        select_arm("A14", None, 200)
+    with pytest.raises(ValueError, match="retired"):
+        select_arm("A13")
+
+
+def test_evaluation_only_comes_from_the_matrix():
+    experiment = load_experiment()
+    experiment["run_matrix"]["evaluation_only"] = ["A0", "A99"]
+    assert backbone_arms("avf", False, experiment) == ["A0", "A99"]
+    assert backbone_arms("avf", True, experiment)[:2] == ["A0", "A99"]
+
+
+def runs(**scores):
+    rows = [{"tuned": {}, "score": 0.70}]
+    return rows + [{"tuned": {k: v}, "score": s} for k, (v, s) in scores.items()]
+
+
+def test_tuning_keeps_defaults_under_one_point():
+    assert select_tuned(runs(alpha=(0.5, 0.7099), gamma=(2.0, 0.70))) == {}
+
+
+def test_tuning_takes_a_gain_of_one_point():
+    assert select_tuned(runs(alpha=(0.5, 0.71), T=(100, 0.75))) == {"alpha": 0.5, "T": 100}
+
+
+def test_tuning_picks_best_value_per_factor():
+    rows = runs() + [{"tuned": {"gamma": 0.5}, "score": 0.72}, {"tuned": {"gamma": 2.0}, "score": 0.74}]
+    assert select_tuned(rows) == {"gamma": 2.0}
+
+
+def test_tuning_needs_the_default_run():
+    with pytest.raises(ValueError):
+        select_tuned([{"tuned": {"T": 100}, "score": 0.7}])
+
+
+def test_print_runs(capsys):
+    config_main(["--print-runs", "--backbone", "avf"])
+    lines = capsys.readouterr().out.splitlines()
+    assert lines[0] == "avf A0 evaluation_only" and len(lines) == 13
+    assert "avf A15 T=200 seed=2 steps=6400" in lines
+    config_main(["--print-runs", "--tuned", '{"T": 100}'])
+    assert "qwen3_omni A14 T=500 seed=0 steps=6400" in capsys.readouterr().out
+    config_main(["--print-runs", "--gate0-failed"])
+    assert capsys.readouterr().out.splitlines() == ["qwen3_omni A0 evaluation_only"]
+
+
+def test_select_tuned_cli(tmp_path, capsys):
+    path = tmp_path / "r.json"
+    path.write_text(json.dumps(runs(T=(500, 0.8))))
+    config_main(["--select-tuned", str(path)])
+    assert json.loads(capsys.readouterr().out) == {"T": 500}

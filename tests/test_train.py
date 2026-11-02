@@ -7,15 +7,15 @@ import torch
 from conftest import CLASSES, make_disjoint
 from test_sync import BASE, resolve
 
-from avrsi.config import resolve_arm
+from avrsi.config import load_experiment, resolve_arm
 from avrsi.critic import AV_PAIR
 from avrsi.grpo import grpo_loss
-from avrsi.models.base import ACTOR, Generation
+from avrsi.models.base import ACTOR, Generation, Sampling
 from avrsi.models.fake import FakeBackend
-from avrsi.parse import Item
+from avrsi.parse import Item, parse_path
 from avrsi.perturb import build_planted
 from avrsi.sync import GuardSet
-from avrsi.train import group_rewards, grpo_update, train, xm_dev_scorer
+from avrsi.train import Samplings, _health, group_rewards, grpo_update, samplings_from, train, xm_dev_scorer
 
 
 @pytest.fixture(scope="module")
@@ -170,8 +170,8 @@ def test_gemini_arm_requires_executor(natural, xm_train, samplings):
         run(small("A3"), natural, xm_train, None, samplings, backend=FakeBackend(CLASSES))
 
 
-def test_a7_needs_undefined_scorer(natural, xm_train, samplings):
-    with pytest.raises(NotImplementedError, match="r_arr"):
+def test_a7_needs_a_scorer(natural, xm_train, samplings):
+    with pytest.raises(ValueError, match="r_arr"):
         run(small("A7"), natural, xm_train, None, samplings, backend=FakeBackend(CLASSES))
 
 
@@ -254,3 +254,85 @@ def test_step_log_is_json(natural, xm_train, guard_set, samplings, tmp_path):
     run(small(), natural, xm_train, guard_set, samplings, backend=FakeBackend(CLASSES), out_dir=tmp_path, steps=1)
     row = json.loads((tmp_path / "steps.jsonl").read_text().splitlines()[0])
     assert {"loss", "kl", "tie_rate", "supported_rate", "fusion_token_share", "step_seconds", "tokens_mean"} <= set(row)
+
+
+TOKENS = ["<audio>", "The sound of dog can be heard.", "</audio>"]
+
+
+def expected_gradient(backend, ids, advantage, beta):
+    """The GRPO gradient at the current θ, written out: ratio is 1 at the point, KL is against θ_0."""
+    theta = backend.policy.detach().clone().requires_grad_()
+    ids = torch.tensor(ids)
+    pick = lambda table: torch.log_softmax(table[ids[:-1]], -1).gather(1, ids[1:, None]).squeeze(1)  # noqa: E731
+    logps, ref = pick(theta), pick(backend.reference_table)
+    diff = ref - logps
+    (-(logps - logps.detach() + 1) * advantage + beta * (torch.exp(diff) - diff - 1)).mean().backward()
+    return theta.grad
+
+
+def test_gradient_numeric_over_two_steps():
+    backend = FakeBackend(CLASSES)
+    ids = [backend.ids[t] for t in TOKENS]
+    gen = Generation("", ids)
+    optimizer = torch.optim.SGD(backend.trainable_parameters(), lr=0.5)
+    grpo_update(backend, optimizer, [(None, gen, 1.0)], beta=0.1)
+    second = expected_gradient(backend, ids, 1.0, 0.1)
+    assert not torch.equal(backend.policy.detach(), backend.reference_table)
+    grpo_update(backend, optimizer, [(None, gen, 1.0)], beta=0.1)
+    assert torch.allclose(backend.policy.grad, second, atol=1e-6)
+
+
+def test_kl_stays_against_theta_0_after_sync():
+    backend = FakeBackend(CLASSES)
+    ids = [backend.ids[t] for t in TOKENS]
+    gen = Generation("", ids)
+    backend.policy.data[ids[0], ids[1]] += 1.0
+    backend.sync_critic()
+    assert torch.equal(backend.critic_table, backend.policy.detach())
+    actor = backend.score_logprobs([None], [gen])[0].detach()
+    reference = backend.score_logprobs([None], [gen], "reference")[0]
+    expected = (torch.exp(reference - actor) - (reference - actor) - 1).mean()
+    optimizer = torch.optim.SGD(backend.trainable_parameters(), lr=0.0)
+    assert expected > 0.01
+    assert grpo_update(backend, optimizer, [(None, gen, 1.0)], beta=0.1)["kl"] == pytest.approx(float(expected))
+
+
+def test_samplings_from_reads_each_setting():
+    experiment = load_experiment()
+    arm = resolve_arm("A8")
+    s = samplings_from(experiment, arm)
+    assert s.rollout == Sampling(1.0, 1.0, True, 512)
+    assert s.greedy == Sampling(0.0, 1.0, False, 512)
+    assert s.critic == Sampling(0.0, 1.0, False, 256)
+    assert (s.rollout.top_k, s.greedy.repetition_penalty) == (0, 1.0)
+
+
+def test_dev_scorer_uses_the_evaluation_extractor():
+    class Bare(FakeBackend):
+        def _rollout(self, role, sampling):
+            return Generation("The answer is yes")
+
+    items = [Item("a", "q", "yes", is_xm=True, video="v", audio="v", meta={"family": "F1", "answer_class": "yes"})]
+    scorer = xm_dev_scorer(items, Samplings(Sampling(1.0, 1.0, True, 8), Sampling(0.0, 1.0, False, 8), Sampling(0.0, 1.0, False, 8)))
+    assert scorer(Bare(), 1)["xm_dev_balanced_accuracy"] == 1.0
+
+
+def test_fusion_share_counts_all_path_tokens():
+    text = "<audio>One two.</audio><visual>One two.</visual><fusion>Three four.</fusion><answer>a b c d</answer>"
+    item = Item("i", "q", "yes", is_xm=True)
+    health = _health([{"verdicts": None, "paths": [parse_path(text, item)]}])
+    assert health["fusion_token_share"] == 2 / 10  # the duplicated visual sentence and the answer count
+
+
+def test_silence_reaches_the_reward_through_to_item(xm):
+    silence = next(i for i in xm["test"] if i.kind == "silence")
+    item = silence.to_item("m")
+    assert item.silence
+
+    class AllSupported:
+        def run(self, it, passes):
+            return ["A" if p.view == AV_PAIR else "1: supported" for p in passes]
+
+    text = f"<audio>Quiet.</audio><visual>A view.</visual><fusion></fusion><answer>{silence.answer}</answer>"
+    totals, _ = group_rewards(resolve_arm("A8"), item, [Generation(text)] * 2, AllSupported(), random.Random(0))
+    assert sum(totals) / 2 == pytest.approx(1 + 1 + 0.5 + 2 / 3)

@@ -24,11 +24,13 @@ defaults:
   t_sweep: false
 
 sampling:
-  rollout: {temperature: 1.0, top_p: 1.0, do_sample: true}
-  greedy: {temperature: 0.0, top_p: 1.0, do_sample: false}  # critic, eval, guard
+  rollout: {temperature: 1.0, top_p: 1.0, do_sample: true, top_k: 0, repetition_penalty: 1.0}
+  greedy: {temperature: 0.0, top_p: 1.0, do_sample: false, top_k: 0, repetition_penalty: 1.0}  # critic, eval, guard
   # Not in PLAN: critics need a cap; 256 covers one line per sentence of a 512-token path.
   critic_max_new_tokens: 256
   auroc_sampled_passes: 4  # §9: the one sampled critic use
+  self_preference_items: 32  # not in PLAN: §7.3 logging at dev checkpoints, outside the §6 guard count
+  t8_probe_items: 8          # not in PLAN: T8 probes before each run
 
 arms:
   A0: {trained: false, critic: none, pair_orders: none, check_view: none, guard: none, guard_view: none}
@@ -49,8 +51,8 @@ arms:
   A15: {check_view: joint, guard_view: joint}
 
 a7:
-  lalm: audio-flamingo-3             # appendix
-  embedding: Qwen3-Embedding-0.6B    # appendix
+  lalm: nvidia/audio-flamingo-3-hf   # appendix; hub id [VERIFY]
+  embedding: Qwen/Qwen3-Embedding-0.6B  # appendix; hub org [VERIFY]
 
 tuning:
   alpha: [0.5, 1.0]
@@ -76,6 +78,9 @@ xm:
   similarity_tier: 0.5       # appendix: bottom 50% of pair similarity
   siglip_min_precision: 0.9
   human_error_max: 0.05
+  siglip_model: google/siglip-base-patch16-224   # [VERIFY] Phase 0
+  clap_model: laion/clap-htsat-unfused           # [VERIFY] Phase 0
+  planted_dev_per_type: 64   # not in PLAN: prompt iteration set, inside XM-Dev's F1/F2 items
 
 judges:
   gemini:
@@ -89,6 +94,11 @@ judges:
     max_usd: 50.0
     usd_per_call: null        # pricing [VERIFY]; while null only max_calls is enforced
     timeout_s: 120
+    caps:                     # §6 volume, own ledger per scope; set max_usd with usd_per_call
+      A3: {max_calls: 720000, max_usd: null}   # 716,800 + retries
+      A4: {max_calls: 720000, max_usd: null}
+      gate0: {max_calls: 6000, max_usd: 500.0} # 4 passes × 500 planted × 3 backbones
+      audit: {max_calls: 54000, max_usd: 500.0} # half of §6's 108k, the other half on OpenAI
   openai:
     provider: openai
     base_url: https://api.openai.com/v1
@@ -100,3 +110,6 @@ judges:
     max_usd: 50.0
     usd_per_call: null
     timeout_s: 120
+    frames: 8                 # no video input [VERIFY API]: sampled frames plus audio
+    caps:
+      audit: {max_calls: 54000, max_usd: 500.0}

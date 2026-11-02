@@ -8,13 +8,16 @@ from pathlib import Path
 import numpy as np
 
 from avrsi.config import load_experiment, load_model
-from avrsi.critic import actor_prompt
+from avrsi.critic import actor_prompt, prompt_digest
 from avrsi.data import load_benchmark
 from avrsi.metrics import (accuracy, avhbench_score, balanced_accuracy, cmm_score, f1, modality_dominance_index, reasoning_length,
-                           swap_sensitivity, xm_balanced_accuracy, yes_rate)
+                           swap_sensitivity, xm_balanced_accuracy, xrs, yes_rate)
 from avrsi.parse import eval_answer, gold_answer
 from avrsi.perturb import load_frozen
 from avrsi.stats import accuracy_term, avhbench_term, cmm_term, decide, mcnemar, paired_delta_bootstrap, xm_term
+
+
+XRS_TERMS = ("cmm", "avhbench", "xm")
 
 
 def load_items(args):
@@ -71,11 +74,12 @@ def cmd_predict(args):
     arm = resolve_arm("A8")
     if args.adapter:
         backend.attach_lora(arm.lora_r)
-        backend.load_adapter(args.adapter)
+        backend.load_adapters(args.adapter, trainable=False)
     greedy = samplings_from(experiment, arm).greedy
+    Path(f"{args.out}.meta.json").write_text(json.dumps({"prompt_digest": prompt_digest(), "modalities": args.modalities}))
     with open(args.out, "w") as f:
         for item in load_items(args):
-            x = build_model_input(item, item.modalities, actor_prompt(item), model["missing_modality_fill"])
+            x = build_model_input(item, args.modalities, actor_prompt(item), model["missing_modality_fill"])
             out = backend.generate([x], greedy, ACTOR)[0]
             f.write(json.dumps({"item_id": item.item_id, "text": out.text, "tokens": len(out.token_ids)}) + "\n")
 
@@ -94,10 +98,14 @@ def parse_system(spec):
 def cmd_compare(args):
     annotations = dict(a.split("=") for a in args.annotation)
     roots = dict(a.split("=") for a in args.media_root)
+    specs_a, specs_b = dict(map(parse_system, args.a)), dict(map(parse_system, args.b))
+    if set(specs_a) != set(specs_b) or len(specs_a) != len(args.a) or len(specs_b) != len(args.b):
+        raise SystemExit(f"--a and --b must name the same benchmarks once each: {sorted(specs_a)} vs {sorted(specs_b)}")
+    if not args.accuracy and set(specs_a) != set(XRS_TERMS):
+        raise SystemExit(f"ΔXRS needs exactly {XRS_TERMS}, got {sorted(specs_a)}")
     terms, a, b = {}, {}, {}
-    for spec_a, spec_b in zip(args.a, args.b):
-        name, files_a = parse_system(spec_a)
-        _, files_b = parse_system(spec_b)
+    for name, files_a in specs_a.items():
+        files_b = specs_b[name]
         ns = argparse.Namespace(benchmark=name, annotations=annotations[name], root=roots[name])
         items = load_items(ns)
         if name == "avhbench":
@@ -108,6 +116,8 @@ def cmd_compare(args):
         a[name] = np.array([[r["correct"] for r in rows] for rows in rows_a], float)
         b[name] = np.array([[r["correct"] for r in rows] for rows in rows_b], float)
     result = paired_delta_bootstrap(terms, a, b, args.bootstraps, args.seed)
+    if not args.accuracy:
+        result |= {f"xrs_{k}": xrs(*(terms[n].score(v[n]) for n in XRS_TERMS)) for k, v in (("a", a), ("b", b))}
     result["mcnemar_first_seed"] = {n: mcnemar(a[n][0] > 0, b[n][0] > 0) for n in terms}  # secondary, §7.4
     print(json.dumps(result))
 
@@ -129,6 +139,8 @@ def main(argv=None):
         if name == "predict":
             p.add_argument("--model", required=True)
             p.add_argument("--adapter")
+            p.add_argument("--modalities", nargs="+", choices=["audio", "video"], default=["audio", "video"],
+                           help="T9: A-only and V-only baselines")
             p.add_argument("--out", required=True)
         else:
             p.add_argument("--predictions", required=True)

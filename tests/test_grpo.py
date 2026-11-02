@@ -54,3 +54,17 @@ def test_per_token_kl_weight_scales_with_beta():
     a, _ = grpo_loss(logps, logps, ref, torch.zeros(1), torch.ones(1, 1), beta=0.01)
     b, _ = grpo_loss(logps, logps, ref, torch.zeros(1), torch.ones(1, 1), beta=0.02)
     assert float(b) == pytest.approx(2 * float(a))
+
+
+def test_kl_numeric_on_known_logps():
+    logps, ref = torch.log(torch.tensor([0.5])), torch.log(torch.tensor([0.25]))
+    expected = 0.25 / 0.5 - torch.log(torch.tensor(0.25 / 0.5)) - 1  # r − ln r − 1 with r = π_ref/π_θ
+    assert torch.allclose(per_token_kl(logps, ref), expected[None])
+    assert per_token_kl(logps, ref) == pytest.approx(0.19315, abs=1e-4)
+
+
+def test_loss_numeric_on_known_logps():
+    logps, ref = torch.log(torch.tensor([[0.5, 0.25]])), torch.log(torch.tensor([[0.25, 0.25]]))
+    loss, stats = grpo_loss(logps, logps, ref, torch.tensor([2.0]), torch.ones(1, 2), beta=0.1)
+    assert stats["kl"] == pytest.approx(0.19315 / 2, abs=1e-4)
+    assert float(loss) == pytest.approx(-2.0 + 0.1 * 0.19315 / 2, abs=1e-4)

@@ -3,23 +3,25 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 import random
+import shutil
 import time
-from dataclasses import dataclass, field
+from dataclasses import asdict, dataclass, field
 from pathlib import Path
 from typing import Callable, Sequence
 
 import torch
 
-from .config import Arm, load_experiment, load_model, resolve_arm
-from .critic import BackendExecutor, Executor, GroupVerdicts, actor_prompt, score_group
+from .config import Arm, load_experiment, load_model, select_arm
+from .critic import BackendExecutor, Executor, GroupVerdicts, actor_prompt, prompt_digest, score_group
 from .grpo import grpo_loss
 from .metrics import fusion_token_share, supported_rate, tie_rate, xm_balanced_accuracy
 from .models.base import ACTOR, CRITIC, REFERENCE, Backend, Generation, Sampling, build_model_input
-from .parse import Item, ParsedPath, eval_answer, gold_answer, normalise_tokens, parse_path, r_format
+from .parse import Item, ParsedPath, eval_answer, gold_answer, parse_path, r_format, segment_tokens
 from .perturb import sample_batch
 from .rewards import group_advantages, pairwise_r, r_outcome, r_pair, r_total, r_total_rl_comm, r_xm
-from .sync import Guard, GuardSet, actor_outcome, evaluate_actor
+from .sync import Guard, GuardSet, actor_outcome, evaluate_actor, modality_probes, self_preference
 
 
 @dataclass
@@ -27,13 +29,16 @@ class Samplings:
     rollout: Sampling
     greedy: Sampling
     critic: Sampling
+    self_preference_items: int = 32
+    t8_probe_items: int = 8
 
 
 def samplings_from(experiment: dict, arm: Arm) -> Samplings:
     s = experiment["sampling"]
     return Samplings(Sampling(**s["rollout"], max_new_tokens=arm.max_new_tokens),
                      Sampling(**s["greedy"], max_new_tokens=arm.max_new_tokens),
-                     Sampling(**s["greedy"], max_new_tokens=s["critic_max_new_tokens"]))
+                     Sampling(**s["greedy"], max_new_tokens=s["critic_max_new_tokens"]),
+                     s["self_preference_items"], s["t8_probe_items"])
 
 
 @dataclass
@@ -49,8 +54,6 @@ def group_rewards(arm: Arm, item: Item, gens: Sequence[Generation], executor: Ex
     outcome = [r_outcome(p, item) for p in paths]
     fmt = [r_format(p.raw) for p in paths]
     if arm.reward == "rl_comm":
-        if rl_comm_scorer is None:
-            raise NotImplementedError("A7 needs r_arr and r_avc: PLAN §8 names them but gives no definition, so pass a scorer")
         extra = rl_comm_scorer(item, paths)
         totals = [r_total_rl_comm(o, f, arr, avc, arm.lam) for o, f, (arr, avc) in zip(outcome, fmt, extra)]
         return totals, {"passes": 0, "verdicts": None, "paths": paths}
@@ -72,7 +75,8 @@ def _health(info: Sequence[dict]) -> dict:
     pairs = [v for g in verdicts for v in g.pair_outcomes.values()]
     claims = [v for g in verdicts for segment in (g.audio, g.visual) for path in segment for v in path]
     valid = [p for p in paths if p.valid]
-    shares = [fusion_token_share(p.fusion, len(normalise_tokens(" ".join(p.audio + p.visual + p.fusion)))) for p in valid]
+    tokens = [segment_tokens(p.raw) for p in valid]
+    shares = [fusion_token_share([" ".join(t["fusion"])], sum(map(len, t.values()))) for t in tokens]
     return {
         "tie_rate": tie_rate(pairs) if pairs else None,
         "supported_rate": supported_rate(claims) if claims else None,
@@ -102,31 +106,116 @@ def grpo_update(backend: Backend, optimizer, rollouts: Sequence[tuple], beta: fl
     return {"loss": total_loss, "kl": total_kl}
 
 
+def _append(path: Path | None, record: dict) -> None:
+    if path:
+        with path.open("a") as f:
+            f.write(json.dumps(record) + "\n")
+
+
+def save_checkpoint(out: Path, step: int, backend: Backend, optimizer, rng: random.Random, guard: Guard | None) -> Path:
+    """Written beside the live one, then swapped in by LATEST, so a crash leaves a whole checkpoint."""
+    final = out / "checkpoints" / f"step_{step:06d}"
+    partial = final.with_suffix(".partial")
+    shutil.rmtree(partial, ignore_errors=True)
+    partial.mkdir(parents=True)
+    backend.save_adapters(partial / "adapters")
+    torch.save({"step": step, "optimizer": optimizer.state_dict(), "python_rng": rng.getstate(), "torch_rng": torch.get_rng_state(),
+                "cuda_rng": torch.cuda.get_rng_state_all() if torch.cuda.is_available() else None,
+                "guard": guard.state() if guard else None}, partial / "state.pt")
+    partial.rename(final)
+    latest = out / "checkpoints" / "LATEST"
+    previous = latest.read_text().strip() if latest.exists() else None
+    tmp = latest.with_suffix(".tmp")
+    tmp.write_text(final.name)
+    os.replace(tmp, latest)
+    if previous and previous != final.name:
+        shutil.rmtree(out / "checkpoints" / previous)
+    return final
+
+
+def truncate_jsonl(path: Path, step: int) -> None:
+    """Drops rows past `step` and a torn last line. Rows without a step (θ_0's reference) stay."""
+    if not path.exists():
+        return
+    kept = []
+    for line in path.read_text().splitlines():
+        try:
+            row = json.loads(line)
+        except json.JSONDecodeError:
+            continue
+        if row.get("step", 0) <= step:
+            kept.append(line)
+    tmp = path.with_suffix(".tmp")
+    tmp.write_text("".join(f"{line}\n" for line in kept))
+    os.replace(tmp, path)
+
+
+def load_checkpoint(out: Path, backend: Backend, lr: float, rng: random.Random, guard: Guard | None) -> tuple[int, torch.optim.Optimizer]:
+    """Restores everything save_checkpoint wrote and cuts the logs back to its step. The optimizer is
+    built after the adapters load, as a reload may replace parameter objects."""
+    latest = out / "checkpoints" / "LATEST"
+    if not latest.exists():
+        raise FileNotFoundError(f"nothing to resume in {out}")
+    path = out / "checkpoints" / latest.read_text().strip()
+    state = torch.load(path / "state.pt", weights_only=False)
+    backend.load_adapters(path / "adapters")
+    optimizer = torch.optim.AdamW(backend.trainable_parameters(), lr=lr)
+    optimizer.load_state_dict(state["optimizer"])
+    rng.setstate(state["python_rng"])
+    torch.set_rng_state(state["torch_rng"])
+    if state["cuda_rng"] is not None:
+        torch.cuda.set_rng_state_all(state["cuda_rng"])
+    if guard:
+        guard.restore(state["guard"])
+    for name in ("steps.jsonl", "dev.jsonl", "guard.jsonl"):
+        truncate_jsonl(out / name, state["step"])
+    return state["step"], optimizer
+
+
+def _manifest(out: Path, arm: Arm, seed: int, steps: int, resume: bool, extra: dict | None) -> None:
+    """prompt_digest in every run; a resume must not cross a prompt change."""
+    manifest = {"prompt_digest": prompt_digest(), "arm": asdict(arm), "seed": seed, "steps": steps, **(extra or {})}
+    path = out / "run.json"
+    if resume and json.loads(path.read_text())["prompt_digest"] != manifest["prompt_digest"]:
+        raise ValueError("prompts changed since this run started")
+    path.write_text(json.dumps(manifest, indent=2))
+
+
 def train(arm: Arm, backend: Backend, natural: Sequence[Item], xm_train: Sequence[Item], guard_set: GuardSet | None,
           samplings: Samplings, dev_score: Callable[[Backend, int], dict] | None = None, seed: int = 0, steps: int | None = None,
           out_dir: str | Path | None = None, external_executor: Executor | None = None,
-          rl_comm_scorer: Callable | None = None, fill: str | None = None) -> TrainResult:
+          rl_comm_scorer: Callable | None = None, fill: str | None = None, resume: bool = False,
+          manifest: dict | None = None) -> TrainResult:
     if not arm.trained or arm.retired:
         raise ValueError(f"{arm.id} is not a training run")
     if arm.critic == "gemini" and external_executor is None:
         raise ValueError(f"{arm.id} needs an external Gemini executor")
     if arm.guard == "xm_guard" and guard_set is None:
         raise ValueError(f"{arm.id} needs XM-Guard")
+    if arm.reward == "rl_comm" and rl_comm_scorer is None:
+        raise ValueError(f"{arm.id} needs a scorer for r_arr and r_avc (rlcomm.py)")
+    if resume and out_dir is None:
+        raise ValueError("resume needs out_dir")
     steps = arm.T_max if steps is None else steps
     rng = random.Random(seed)
     torch.manual_seed(seed)
     out = Path(out_dir) if out_dir else None
     if out:
         out.mkdir(parents=True, exist_ok=True)
+        _manifest(out, arm, seed, steps, resume, manifest)
     executor = external_executor if arm.critic == "gemini" else BackendExecutor(backend, samplings.critic, CRITIC, fill)
-    if arm.critic == "none":
+    if arm.critic in ("none", "lalm"):
         executor = None
     guard = Guard(arm, out / "guard.jsonl" if out else None) if arm.has_handoff else None
-    if arm.guard == "xm_guard":
-        guard.set_reference(evaluate_actor(backend, guard_set, arm, actor_prompt, samplings.greedy, samplings.critic, fill, reference=True))
-    optimizer = torch.optim.AdamW(backend.trainable_parameters(), lr=arm.lr)
+    start = 0
+    if resume:
+        start, optimizer = load_checkpoint(out, backend, arm.lr, rng, guard)
+    else:
+        optimizer = torch.optim.AdamW(backend.trainable_parameters(), lr=arm.lr)
+        if arm.guard == "xm_guard":
+            guard.set_reference(evaluate_actor(backend, guard_set, arm, actor_prompt, samplings.greedy, samplings.critic, fill, reference=True))
     result = TrainResult(guard=guard)
-    for step in range(1, steps + 1):
+    for step in range(start + 1, steps + 1):
         started = time.time()
         batch = sample_batch(natural, xm_train, arm.B, arm.p, rng)
         rollouts, info, totals_all = [], [], []
@@ -149,12 +238,17 @@ def train(arm: Arm, backend: Backend, natural: Sequence[Item], xm_train: Sequenc
         }
         if arm.has_handoff and arm.T and step % arm.T == 0:
             record["handoff"] = _sync(arm, backend, guard, guard_set, batch, samplings, step, fill)
-        if dev_score and step % arm.dev_every == 0:
+        checkpoint = step % arm.dev_every == 0
+        if checkpoint and arm.critic == "self" and guard_set is not None:
+            record["self_preference_rate"] = self_preference(backend, guard_set, samplings.greedy, samplings.critic, fill,
+                                                             samplings.self_preference_items)
+        if dev_score and checkpoint:
             result.dev.append({"step": step, **dev_score(backend, step)})
+            _append(out / "dev.jsonl" if out else None, result.dev[-1])
         result.steps.append(record)
-        if out:
-            with (out / "steps.jsonl").open("a") as f:
-                f.write(json.dumps(record) + "\n")
+        _append(out / "steps.jsonl" if out else None, record)
+        if out and checkpoint:
+            save_checkpoint(out, step, backend, optimizer, rng, guard)
     return result
 
 
@@ -181,9 +275,11 @@ def xm_dev_scorer(items: Sequence[Item], samplings: Samplings, fill: str | None 
     return score
 
 
-def main() -> None:
+def main(argv: Sequence[str] | None = None) -> None:
     parser = argparse.ArgumentParser(description="Train one AVRSI arm (untested on real models)")
     parser.add_argument("--arm", required=True)
+    parser.add_argument("--T", type=int, help="A14's T: one of the values not chosen for A8")
+    parser.add_argument("--resume", action="store_true", help="continue from --out's last checkpoint; logs past it are cut")
     parser.add_argument("--model", required=True, help="configs/models/<name>.yaml")
     parser.add_argument("--natural", required=True, help="benchmark registry name for natural training data")
     parser.add_argument("--natural-root", required=True)
@@ -194,18 +290,18 @@ def main() -> None:
     parser.add_argument("--seed", type=int, default=0)
     parser.add_argument("--steps", type=int)
     parser.add_argument("--tuned", default="{}", help="JSON of tuned values")
-    args = parser.parse_args()
+    args = parser.parse_args(argv)
 
     from .data import load_benchmark
     from .models import load_backend
     from .perturb import load_frozen, load_planted
 
     experiment = load_experiment()
-    arm = resolve_arm(args.arm, json.loads(args.tuned), experiment)
+    arm = select_arm(args.arm, json.loads(args.tuned), args.T, experiment)
     model = load_model(args.model)
+    torch.manual_seed(args.seed)  # LoRA init draws from it
     backend = load_backend(model)
-    if arm.trained:
-        backend.attach_lora(arm.lora_r)
+    backend.attach_lora(arm.lora_r)
     natural = load_benchmark(args.natural, args.natural_root)
     xm_dir = Path(args.xm_dir)
     xm_train = [it.to_item(args.media_root) for it in load_frozen(xm_dir / "train.jsonl")]
@@ -222,11 +318,18 @@ def main() -> None:
         from .judges.media import view_media
 
         media_dir = Path(args.out) / "judge_media"
-        external = JudgeExecutor(make_judge(experiment["judges"]["gemini"]), lambda it, m: view_media(it, m, media_dir))
+        external = JudgeExecutor(make_judge(experiment["judges"]["gemini"], arm.id), lambda it, m: view_media(it, m, media_dir))
+    scorer = None
+    if arm.reward == "rl_comm":
+        from .rlcomm import load_rl_comm_scorer
+
+        scorer = load_rl_comm_scorer(experiment["a7"])
+    settings = {k: model[k] for k in ("backend", "model_id", "dtype", "transformers", "licence", "num_frames", "audio_window_s", "image_size")}
+    manifest = {"model": settings, "tuned": json.loads(args.tuned),
+                "t8_probes": modality_probes(backend, dev, samplings.critic, fill, n=samplings.t8_probe_items)}
     train(arm, backend, natural, xm_train, guard_set, samplings, xm_dev_scorer(dev, samplings, fill), args.seed, args.steps,
-          args.out, external, fill=fill)
-    if arm.trained:
-        backend.save_adapter(Path(args.out) / "adapter")
+          args.out, external, scorer, fill, args.resume, manifest)
+    backend.save_adapters(Path(args.out) / "adapter")
 
 
 if __name__ == "__main__":
