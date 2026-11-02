@@ -1,6 +1,6 @@
 # AVRSI: Recursively Self-Improving Audio-Visual Reasoners with Cross-Modal Checking
 
-Status: plan rev 3, 2026-11-02. Facts carry a source. Anything marked **[VERIFY]** was not confirmed
+Status: plan rev 3.1, 2026-11-02. Facts carry a source. Anything marked **[VERIFY]** was not confirmed
 and must be resolved in Phase 0 before code depends on it.
 
 ## 0. Summary
@@ -268,7 +268,7 @@ Construction, for clips (v_A, a_A) and (v_B, a_B):
 - **Video-swap** (v_B, a_A). Same with F2. ACPO has no such direction. Ground truth rests on the
   SigLIP-verified visual label.
 - **Silence:** replace the whole audio track with silence. Visually present, audio-absent. Audio presence
-  only, within F1; its share of F1 is set in Phase 0b. This is "silence"; no equivalence to AV-ConfuseBench is
+  only, within F1; its share of F1 is 20% of F1. This is "silence"; no equivalence to AV-ConfuseBench is
   claimed.
 - **Conflict:** F3 and F4 on swapped clips.
 - **Aligned control** (v_A, a_A), same templates, ~50% of data. Without it "No" wins by default.
@@ -626,3 +626,13 @@ RL-CoMM 2511.10059 · SFFL 2605.09906 · ACPO 2604.14129 · SVHalluc 2606.02642 
 C3PO 2608.05381 · See-and-Hear 2604.02605 · CAD 2609.04247 · MAD 2601.21181 · CMM 2410.12787 ·
 AVHBench 2410.18325, github.com/kaist-ami/AVHBench · AV-ConfuseBench github.com/rikeilong/AudioVisual_Confusion ·
 AVQA mn.cs.tsinghua.edu.cn/avqa · Transformers docs qwen3_omni_moe.
+
+## Appendix: residual decisions (rev 3.1)
+
+- If A3/A4 are shortened, the matched A8 runs one seed, same as A3/A4.
+- XM-Gate question text follows the F1 and F2 templates only, since planted claims test presence.
+- If fewer than 20% of θ_0 paths pass ValidFormat, planted base paths are assembled from the backbone's own
+  `<audio>` and `<visual>` sentences on a format-prompted rollout, and the θ_0 reference for guard condition 1
+  uses the fallback extractor. Report this per backbone.
+- Guard condition 2 has n=256, so SE stays 1.4-2.8 points. The 0.02 margin is deliberately lenient: this
+  condition blocks gross leniency, not small drift. The 0.05 θ_0 alarm covers slow drift.
