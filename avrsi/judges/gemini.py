@@ -3,7 +3,7 @@ from __future__ import annotations
 
 from typing import Sequence
 
-from .base import Judge, JudgeError, Media
+from .base import Judge, Media
 
 
 class GeminiJudge(Judge):
@@ -16,7 +16,4 @@ class GeminiJudge(Judge):
         return f"{self.base_url}/models/{self.model}:generateContent", headers, body
 
     def _text(self, response: dict) -> str:
-        try:
-            return "".join(p.get("text", "") for p in response["candidates"][0]["content"]["parts"])
-        except (KeyError, IndexError):
-            raise JudgeError("gemini: response has no text") from None
+        return "".join(p.get("text", "") for p in response["candidates"][0]["content"]["parts"])

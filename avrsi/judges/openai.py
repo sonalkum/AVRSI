@@ -23,7 +23,4 @@ class OpenAIJudge(Judge):
         return f"{self.base_url}/chat/completions", headers, body
 
     def _text(self, response: dict) -> str:
-        try:
-            return response["choices"][0]["message"]["content"]
-        except (KeyError, IndexError):
-            raise JudgeError("openai: response has no text") from None
+        return response["choices"][0]["message"]["content"]

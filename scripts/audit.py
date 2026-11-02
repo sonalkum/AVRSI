@@ -39,9 +39,9 @@ def main(argv=None):
     config = load_experiment()["judges"]
     wins = {}
     for name in args.judges:
-        judge, rng = make_judge(config[name]), random.Random(args.seed)
+        judge, rng, frames = make_judge(config[name], "audit"), random.Random(args.seed), config[name].get("frames")
         wins[name] = [audit_pair(judge, it, ours[it.item_id], baseline[it.item_id],
-                                 view_media(it, it.modalities, args.work_dir), rng) for it in items]
+                                 view_media(it, it.modalities, args.work_dir, frames=frames), rng) for it in items]
     result = {f"preference_{n}": audit_preference([w for w in v if w is not None]) for n, v in wins.items()}
     if len(args.judges) == 2:
         a, b = wins[args.judges[0]], wins[args.judges[1]]

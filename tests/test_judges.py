@@ -1,6 +1,7 @@
 import json
 import logging
 import random
+from types import SimpleNamespace
 
 import httpx
 import pytest
@@ -9,8 +10,8 @@ from avrsi.config import load_experiment
 from avrsi.judges import GeminiJudge, JudgeError, Media, OpenAIJudge, SpendCapExceeded, load_key, make_judge
 from avrsi.judges.audit import audit_pair
 from avrsi.judges.base import Secret, SpendCap
-from avrsi.judges.media import view_media
-from avrsi.critic import JudgeExecutor, CriticPass, A_CHECK
+from avrsi.judges.media import sample_frames, view_media
+from avrsi.critic import JudgeExecutor, CriticPass, A_CHECK, parse_check, parse_pair
 from avrsi.parse import Item
 
 KEY = "sk-test-CANARY-0123456789"
@@ -283,3 +284,116 @@ def test_audit_is_blind_and_maps_order_back():
 
     rng = random.Random(0)
     assert all(audit_pair(J(), Item("c", "q", "yes"), "OURS", "BASE", [], rng) == 1.0 for _ in range(20))
+
+
+def test_audit_order_is_randomised():
+    orders = []
+
+    class J:
+        def complete(self, prompt, media):
+            orders.append(prompt.index("OURS") < prompt.index("BASE"))
+            return "Tie"
+
+    rng = random.Random(0)
+    for _ in range(40):
+        audit_pair(J(), Item("c", "q", "yes"), "OURS", "BASE", [], rng)
+    assert 5 < sum(orders) < 35
+
+
+def flaky(failures, reply):
+    calls = {"n": 0}
+
+    def handler(request):
+        calls["n"] += 1
+        if calls["n"] <= failures:
+            raise httpx.ConnectTimeout("slow")
+        return httpx.Response(200, json=reply)
+
+    return handler, calls
+
+
+def test_transport_errors_retry_with_backoff(tmp_path):
+    handler, calls = flaky(2, gemini_ok("ok"))
+    slept = []
+    judge = GeminiJudge(config("gemini"), transport=httpx.MockTransport(handler), cache_dir=tmp_path, sleep=slept.append)
+    assert judge.complete("hello") == "ok"
+    assert calls["n"] == 3 and slept == [1.0, 2.0] and judge.cap.calls == 3
+
+
+def test_transport_errors_give_up_after_max_attempts(tmp_path):
+    handler, calls = flaky(9, gemini_ok())
+    with pytest.raises(JudgeError, match="transport error ConnectTimeout"):
+        gemini(tmp_path, handler).complete("hello")
+    assert calls["n"] == 3
+
+
+@pytest.mark.parametrize("reply", [{"candidates": []}, {}, {"candidates": [{"finishReason": "SAFETY"}]}])
+def test_gemini_200_without_text_is_empty_and_cached(tmp_path, reply):
+    rec = Recorder(reply)
+    judge = gemini(tmp_path, rec)
+    assert judge.complete("hello") == "" and judge.complete("hello") == ""
+    assert len(rec.requests) == 1
+
+
+def test_openai_200_null_content_is_empty(tmp_path):
+    assert openai(tmp_path, Recorder({"choices": [{"message": {"content": None}}]})).complete("hello") == ""
+
+
+def test_empty_reply_is_a_parse_failure_not_a_crash():
+    assert parse_check("", 2) is None and parse_pair("") is None
+
+
+def test_caps_are_per_scope_with_own_ledger(tmp_path):
+    rec = Recorder(gemini_ok())
+    cfg = {**config("gemini"), "caps": {"A3": {"max_calls": 1, "max_usd": None}, "A4": {"max_calls": 2, "max_usd": None}}}
+    a3 = make_judge(cfg, "A3", transport=httpx.MockTransport(rec), cache_dir=tmp_path, sleep=lambda s: None)
+    a4 = make_judge(cfg, "A4", transport=httpx.MockTransport(rec), cache_dir=tmp_path, sleep=lambda s: None)
+    a3.complete("one")
+    with pytest.raises(SpendCapExceeded):
+        a3.complete("two")
+    a4.complete("two"), a4.complete("three")
+    assert (tmp_path / "gemini" / "ledger_A3.json").exists() and (tmp_path / "gemini" / "ledger_A4.json").exists()
+
+
+def test_a3_a4_caps_cover_their_volume():
+    caps = load_experiment()["judges"]["gemini"]["caps"]
+    assert caps["A3"]["max_calls"] >= 716_800 and caps["A4"]["max_calls"] >= 716_800
+
+
+def test_usd_per_call_needs_a_usd_cap(tmp_path):
+    with pytest.raises(JudgeError, match="max_usd"):
+        SpendCap(tmp_path / "l.json", 10, None, 0.01)
+
+
+def media_runner(calls):
+    def run(cmd, check, **kwargs):
+        calls.append(cmd)
+        return SimpleNamespace(stdout="10.0\n")
+    return run
+
+
+def test_sample_frames_uniform_times(tmp_path):
+    calls = []
+    frames = sample_frames("v.mp4", 4, tmp_path, "c", runner=media_runner(calls))
+    assert calls[0][0] == "ffprobe" and [c[c.index("-ss") + 1] for c in calls[1:]] == ["1.250", "3.750", "6.250", "8.750"]
+    assert all(c[0] == "ffmpeg" and "v.mp4" in c for c in calls[1:])
+    assert [m.kind for m in frames] == ["image"] * 4 and frames[0].mime == "image/jpeg"
+
+
+def test_view_media_frames_with_audio_and_no_video_part(tmp_path):
+    calls = []
+    item = Item("c", "q", "yes", video="v.mp4")
+    media = view_media(item, ("audio", "video"), tmp_path, runner=media_runner(calls), frames=2)
+    assert [m.kind for m in media] == ["image", "image", "audio"] and "-vn" in calls[-1]
+
+
+def test_view_media_frames_never_add_audio_to_a_video_view(tmp_path):
+    media = view_media(Item("c", "q", "yes", video="v.mp4"), ("video",), tmp_path, runner=media_runner([]), frames=2)
+    assert {m.kind for m in media} == {"image"}
+
+
+def test_openai_accepts_the_frame_view(tmp_path):
+    rec = Recorder(openai_ok())
+    (tmp_path / "x.jpg").write_bytes(b"a")
+    openai(tmp_path, rec).complete("p", [Media("image", "image/jpeg", str(tmp_path / "x.jpg"))])
+    assert json.loads(rec.requests[0].content)["messages"][0]["content"][1]["type"] == "image_url"

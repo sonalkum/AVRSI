@@ -90,7 +90,9 @@ class SpendCap:
     """Calls and estimated USD, persisted so reruns share the cap. usd_per_call None means pricing
     is unresolved [VERIFY] and only max_calls applies."""
 
-    def __init__(self, ledger: str | Path, max_calls: int, max_usd: float, usd_per_call: float | None):
+    def __init__(self, ledger: str | Path, max_calls: int, max_usd: float | None, usd_per_call: float | None):
+        if usd_per_call is not None and max_usd is None:
+            raise JudgeError("usd_per_call is set, so max_usd must be too")
         self.ledger, self.max_calls, self.max_usd, self.usd_per_call = Path(ledger), max_calls, max_usd, usd_per_call
         self.calls = json.loads(self.ledger.read_text())["calls"] if self.ledger.exists() else 0
 
@@ -111,13 +113,14 @@ class Judge:
     provider = ""
 
     def __init__(self, config: dict, transport: httpx.BaseTransport | None = None, cache_dir: str | Path | None = None,
-                 sleep: Callable[[float], None] = time.sleep, max_attempts: int = 3):
+                 sleep: Callable[[float], None] = time.sleep, max_attempts: int = 3, scope: str | None = None):
         self.config, self.sleep, self.max_attempts = config, sleep, max_attempts
         self.model = config["model"]
         self.base_url = config["base_url"].rstrip("/")
         root = Path(cache_dir or config["cache_dir"]) / self.provider
         self.cache = DiskCache(root)
-        self.cap = SpendCap(root / "ledger.json", config["max_calls"], config["max_usd"], config["usd_per_call"])
+        self.cap = SpendCap(root / (f"ledger_{scope}.json" if scope else "ledger.json"), config["max_calls"], config["max_usd"],
+                            config["usd_per_call"])
         self._key = load_key(config["key_env"], config["key_file"])
         self._client = httpx.Client(transport=transport, timeout=config["timeout_s"])
 
@@ -135,6 +138,14 @@ class Judge:
     def _text(self, response: dict) -> str:
         raise NotImplementedError
 
+    def _parsed_text(self, response: httpx.Response) -> str:
+        """A 200 without text is the critic's answer to this prompt: "" fails to parse (§3.3) and is cached."""
+        try:
+            return self._text(response.json()) or ""
+        except (KeyError, IndexError, TypeError, ValueError):
+            log.warning("%s %s 200 without text", self.provider, self.model)
+            return ""
+
     def complete(self, prompt: str, media: Sequence[Media] = ()) -> str:
         if not self.model:
             raise JudgeError(f"{self.provider}: model id unset [VERIFY]")
@@ -149,9 +160,13 @@ class Judge:
                 response = self._client.post(url, headers=headers, json=body)
             except httpx.HTTPError as e:
                 # httpx messages can quote request detail, so only the type leaves this frame.
-                raise JudgeError(f"{self.provider}: transport error {type(e).__name__}") from None
+                log.warning("%s %s transport error %s", self.provider, self.model, type(e).__name__)
+                if attempt == self.max_attempts - 1:
+                    raise JudgeError(f"{self.provider}: transport error {type(e).__name__}") from None
+                self.sleep(2.0 ** attempt)
+                continue
             if response.status_code == 200:
-                text = self._text(response.json())
+                text = self._parsed_text(response)
                 self.cache.put(key, text)
                 log.info("%s %s ok, cache %s", self.provider, self.model, key[:12])
                 return text
@@ -159,4 +174,3 @@ class Judge:
             if response.status_code not in RETRYABLE or attempt == self.max_attempts - 1:
                 raise JudgeError(f"{self.provider}: HTTP {response.status_code}")  # body may echo the request
             self.sleep(2.0 ** attempt)
-        raise JudgeError(f"{self.provider}: exhausted attempts")
