@@ -55,12 +55,33 @@ def run_grads(comm, out):
     save_state(out, comm, backend, {"stats": stats})
 
 
+def run_real(comm, out, steps, resume):
+    """A1 on the tiny real thinker and real PEFT, text only: adapters saved by rank 0, loaded by both."""
+    from qwen3_tiny import BASE, tiny_thinker
+    from test_qwen3_real import Tiny
+
+    torch.manual_seed(0)
+    backend = Tiny({**BASE, "lora_exclude_modules": r"(audio_tower|visual)\..*", "gradient_checkpointing": True, "logprob_batch": 2, "generate_batch": 2},
+                   tiny_thinker(0))
+    torch.manual_seed(comm.rank)  # different on purpose: broadcast must fix the start
+    backend.attach_lora(4)
+    natural = [Item(f"n{i}", "Is it here?", "yes", modalities=()) for i in range(4)]
+    arm = replace(resolve_arm("A1"), B=2, K=2, dev_every=2, lr=1e-2, max_new_tokens=4)
+    sampling = Sampling(1.0, 1.0, True, 4)
+    train(arm, backend, natural, [], None, Samplings(sampling, sampling, sampling), seed=0, steps=steps, out_dir=out, resume=resume, comm=comm)
+    params = [p.detach().clone() for p in backend.trainable_parameters()]
+    critic = [p.detach().clone() for n, p in backend.model.named_parameters() if ".critic." in n]
+    torch.save({"params": params, "critic": critic}, Path(out) / f"rank{comm.rank}.pt")
+
+
 if __name__ == "__main__":
     comm, device, _ = dist.setup()
     assert device == "cpu" and comm.world == int(sys.argv[3])
     mode, out = sys.argv[1], sys.argv[2]
     if mode == "grads":
         run_grads(comm, out)
+    elif mode.startswith("real"):
+        run_real(comm, out, int(sys.argv[4]), mode == "real_resume")
     else:
         run_training(comm, out, int(sys.argv[4]), mode == "resume")
     dist.close(comm)

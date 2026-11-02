@@ -262,6 +262,15 @@ def test_k_rollouts_share_a_call_and_differ(monkeypatch):
     assert len({tuple(g.token_ids) for g in gens}) > 1
 
 
+def test_greedy_repeats_run_once(monkeypatch):
+    backend = build(generate_batch=4)
+    calls = []
+    original = backend.model.generate
+    monkeypatch.setattr(backend.model, "generate", lambda **k: calls.append(k) or original(**k))
+    gens = backend.generate([X] * 3, GREEDY)
+    assert len(calls) == 1 and "num_return_sequences" not in calls[0] and len(gens) == 3 and gens[0].token_ids == gens[2].token_ids
+
+
 def test_generation_stops_at_eos_and_keeps_it(monkeypatch):
     backend = build()
     assert backend._generate_kwargs()["eos_token_id"] == [IM_END, Text.pad_token_id]

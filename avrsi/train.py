@@ -183,7 +183,7 @@ def load_checkpoint(out: Path, backend: Backend, lr: float, rng: random.Random, 
     if not latest.exists():
         raise FileNotFoundError(f"nothing to resume in {out}")
     path = out / "checkpoints" / latest.read_text().strip()
-    state = torch.load(path / "state.pt", weights_only=False)
+    state = torch.load(path / "state.pt", weights_only=False, map_location="cpu")
     backend.load_adapters(path / "adapters")
     optimizer = torch.optim.AdamW(backend.trainable_parameters(), lr=lr)
     optimizer.load_state_dict(state["optimizer"])
@@ -350,7 +350,8 @@ def main(argv: Sequence[str] | None = None) -> None:
     arm = select_arm(args.arm, json.loads(args.tuned), args.T, experiment)
     model = load_model(args.model)
     comm, device, gpus = dist.setup(args.gpus_per_rank)
-    model["gpus"] = gpus
+    if gpus:
+        model["gpus"] = gpus
     torch.manual_seed(args.seed)  # LoRA init draws from it
     backend = load_backend(model, device)
     backend.attach_lora(arm.lora_r)

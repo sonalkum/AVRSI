@@ -15,7 +15,8 @@ lora_alpha: 8                 # PEFT's default, stated: scale 0.25 at r=32. PLAN
 gradient_checkpointing: true  # decoder only, on the actor's forward
 logprob_batch: 2              # trajectories of one prompt per forward/backward; lower it on OOM
 generate_batch: 4             # K rollouts in one generate call
-gpu_reserve_gib: 8            # working memory left free per GPU when a rank spans several
+gpus: null                    # e.g. [0, 1] for gate0.py and build_xm.py plant when weights outgrow one GPU
+gpu_reserve_gib: 8            # working memory left free per GPU when a model spans several
 # T7: 2 fps on 10 s clips (AVQA, VGGSound), the rate qwen-omni-utils uses by default. Even, as frames pair
 # up at temporal_patch_size=2. About 2.2k video tokens on a 640x360 clip, 130 audio tokens.
 num_frames: 20

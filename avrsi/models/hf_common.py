@@ -231,11 +231,12 @@ class HFBackend(Backend):
             for x, n in _runs(inputs, self.generate_batch):
                 encoded, flag = self._encode(x)
                 sample = {"temperature": sampling.temperature, "top_p": sampling.top_p, "top_k": sampling.top_k} if sampling.do_sample else {}
-                if n > 1:
+                if n > 1 and sampling.do_sample:
                     sample["num_return_sequences"] = n
                 ids = self.model.generate(**encoded, **sample, **extra, do_sample=sampling.do_sample, repetition_penalty=sampling.repetition_penalty,
                                           max_new_tokens=sampling.max_new_tokens, **{self.flag: flag})
-                for row in ids[:, encoded["input_ids"].shape[1]:].tolist():
+                rows = ids[:, encoded["input_ids"].shape[1]:].tolist()
+                for row in rows if sampling.do_sample else rows * n:  # greedy repeats are the same path
                     new = _through_eos(row, stop)
                     outputs.append(Generation(self.processor.tokenizer.decode(new, skip_special_tokens=True), new))
         return outputs

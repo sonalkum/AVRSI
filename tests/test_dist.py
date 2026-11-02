@@ -19,12 +19,12 @@ def launch(out, *args, world=2):
     with socket.socket() as s:
         s.bind(("127.0.0.1", 0))
         port = s.getsockname()[1]
-    env = {**os.environ, "OMP_NUM_THREADS": "1", "MKL_NUM_THREADS": "1", "PYTHONPATH": f"{ROOT}:{ROOT / 'tests'}:{os.environ.get('PYTHONPATH', '')}",
+    env = {**os.environ, "OMP_NUM_THREADS": "1", "MKL_NUM_THREADS": "1", "PYTHONPATH": f"{ROOT}:{ROOT / 'tests'}:{ROOT / '.venv' / 'run_lib'}:{os.environ.get('PYTHONPATH', '')}",
            "CUDA_VISIBLE_DEVICES": ""}
     command = [sys.executable, "-m", "torch.distributed.run", f"--nproc_per_node={world}", "--master_addr=127.0.0.1", f"--master_port={port}",
                str(ROOT / "tests" / "dist_worker.py"), args[0], str(out), str(world), *map(str, args[1:])]
     done = subprocess.run(command, env=env, capture_output=True, text=True, timeout=300)
-    assert done.returncode == 0, done.stdout[-1500:] + done.stderr[-3000:]
+    assert done.returncode == 0, done.stdout[-1500:] + done.stderr[:2500]
 
 
 def ranks(out, world=2):
@@ -105,6 +105,22 @@ def test_summed_gradients_equal_one_process_on_the_whole_batch(tmp_path):
     assert torch.equal(two[0]["policy"], two[1]["policy"])
     assert torch.allclose(two[0]["policy"], one["policy"], atol=1e-6)
     assert two[0]["stats"]["loss"] == pytest.approx(one["stats"]["loss"]) and two[0]["stats"]["kl"] == pytest.approx(one["stats"]["kl"])
+
+
+@pytest.mark.skipif(not (ROOT / ".venv" / "run_lib" / "peft").is_dir(), reason="peft absent")
+def test_real_thinker_trains_and_resumes_on_two_ranks(tmp_path):
+    whole, broken = tmp_path / "whole", tmp_path / "broken"
+    for path in (whole, broken):
+        path.mkdir()
+    launch(whole, "real", 4)
+    a, b = ranks(whole)
+    assert all(torch.equal(x, y) for x, y in zip(a["params"], b["params"])) and all(torch.equal(x, y) for x, y in zip(a["critic"], b["critic"]))
+    assert (whole / "checkpoints" / "step_000004" / "adapters" / "actor" / "adapter_model.safetensors").exists()
+    assert rows(whole / "steps.jsonl")[-1]["trajectories"] == 4
+    launch(broken, "real", 2)
+    launch(broken, "real_resume", 4)
+    for x, y in zip(ranks(whole), ranks(broken)):
+        assert all(torch.equal(p, q) for p, q in zip(x["params"], y["params"]))
 
 
 def test_local_comm_is_inert():
