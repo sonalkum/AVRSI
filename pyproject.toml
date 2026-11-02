@@ -11,7 +11,7 @@ dependencies = ["torch", "numpy", "scipy", "pyyaml", "httpx"]
 
 [project.optional-dependencies]
 models = ["transformers", "peft", "librosa"]
-test = ["pytest"]
+test = ["pytest<9"]  # pytest 9.2 crashes at startup on Python 3.10.0
 
 [tool.setuptools]
 packages = ["avrsi", "avrsi.judges", "avrsi.data", "avrsi.models"]
