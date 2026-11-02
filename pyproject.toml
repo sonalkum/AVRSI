@@ -1,0 +1,21 @@
+[build-system]
+requires = ["setuptools>=64"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "avrsi"
+version = "0.1.0"
+description = "Recursively self-improving audio-visual reasoners with cross-modal checking"
+requires-python = ">=3.10"
+dependencies = ["torch", "numpy", "scipy", "pyyaml", "httpx"]
+
+[project.optional-dependencies]
+models = ["transformers", "peft", "librosa"]
+test = ["pytest"]
+
+[tool.setuptools]
+packages = ["avrsi", "avrsi.judges", "avrsi.data", "avrsi.models"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+addopts = "-q -p no:cacheprovider"
