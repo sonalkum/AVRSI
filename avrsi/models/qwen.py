@@ -10,6 +10,10 @@ from .hf_common import HFBackend, media_kwargs, model_dtype, read_video, sampled
 class Qwen3OmniBackend(HFBackend):
     """Qwen3OmniMoeThinkerForConditionalGeneration gives text-only output."""
 
+    def __init__(self, config: dict, device: str = "cuda"):
+        super().__init__(config, device)
+        linear_patch_embed(self.model.visual.patch_embed)
+
     def _load(self):
         from transformers import Qwen3OmniMoeProcessor, Qwen3OmniMoeThinkerForConditionalGeneration
 
@@ -50,6 +54,19 @@ class Qwen3OmniBackend(HFBackend):
             return self.model(**encoded, **{self.flag: flag}, use_cache=False).logits
         finally:
             handle.remove()
+
+
+def linear_patch_embed(embed: torch.nn.Module) -> None:
+    """The patch Conv3d has kernel = stride, so it is one matmul per patch. On RTX A6000 (torch 2.9.1,
+    cuDNN 9.10) the bf16 Conv3d took 51 s for a 20-frame clip's 9.2k patches, with or without cuDNN;
+    the same matmul took 0.04 s. Same weights, so adapters and checkpoints are unaffected."""
+    conv = embed.proj
+
+    def forward(hidden_states: torch.Tensor) -> torch.Tensor:
+        weight = conv.weight.view(conv.out_channels, -1)
+        return torch.nn.functional.linear(hidden_states.reshape(-1, weight.shape[1]).to(weight.dtype), weight, conv.bias)
+
+    embed.forward = forward
 
 
 class Qwen2_5OmniBackend(HFBackend):

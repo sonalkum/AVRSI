@@ -282,3 +282,22 @@ def test_the_flag_reaches_every_forward(backend, clip, view, flag, monkeypatch):
     with torch.no_grad():
         backend.score_logprobs([views(clip)[view]], [gen], ACTOR)
     assert generated == 2 and len(seen) == 3 and seen == [flag] * 3
+
+
+def test_patch_embed_is_a_matmul_equal_to_the_conv(backend):
+    """The Conv3d is replaced (51 s per clip in bf16 on an A6000); the result must not change."""
+    embed = backend.model.visual.patch_embed
+    conv = embed.proj
+    pixels = torch.randn(12, conv.weight[0].numel())
+    with torch.no_grad():
+        shaped = pixels.view(-1, embed.in_channels, embed.temporal_patch_size, embed.patch_size, embed.patch_size)
+        want = torch.nn.functional.conv3d(shaped, conv.weight.float(), conv.bias.float(), stride=conv.stride).view(-1, embed.embed_dim)
+        calls = []
+        handle = embed.proj.register_forward_hook(lambda *_: calls.append(1))
+        try:
+            got = embed(pixels)
+        finally:
+            handle.remove()
+    assert not calls
+    assert got.dtype == conv.weight.dtype
+    torch.testing.assert_close(got.float(), want, rtol=2e-2, atol=2e-2)  # bf16 weights, float reference
