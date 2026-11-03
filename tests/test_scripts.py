@@ -290,3 +290,11 @@ def test_smoke_job_asks_for_what_was_specified():
     for line in ("--partition=gamma", "--account=gamma", "--qos=high", "--gres=gpu:rtxa6000:2", "--nodes=1", "-c 16", "--mem=120G", "--time=02:00:00"):
         assert f"#SBATCH {line}" in text
     assert "scripts/smoke_qwen3.py" in text and "run_lib" in text
+
+
+@pytest.mark.parametrize("name", ["smoke_qwen3", "train_qwen3"])
+def test_slurm_log_directory_is_in_the_tree(name):
+    """Slurm opens --output before the job runs, so a fresh clone must already have the directory."""
+    text = (ROOT / "scripts" / "slurm" / f"{name}.sbatch").read_text()
+    output = next(line.split("=", 1)[1] for line in text.splitlines() if line.startswith("#SBATCH --output="))
+    assert (ROOT / output).parent == ROOT / "outputs" / "slurm" and (ROOT / "outputs" / "slurm" / ".gitkeep").exists()

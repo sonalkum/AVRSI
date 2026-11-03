@@ -258,7 +258,7 @@ def test_k_rollouts_share_a_call_and_differ(monkeypatch):
     original = backend.model.generate
     monkeypatch.setattr(backend.model, "generate", lambda **k: calls.append(k) or original(**k))
     gens = backend.generate([X] * 4, SAMPLED)
-    assert len(gens) == 4 and len(calls) == 1 and calls[0]["num_return_sequences"] == 4
+    assert len(gens) == 4 and len(calls) == 1 and calls[0]["input_ids"].shape[0] == 4 and "num_return_sequences" not in calls[0]
     assert len({tuple(g.token_ids) for g in gens}) > 1
 
 
@@ -268,7 +268,7 @@ def test_greedy_repeats_run_once(monkeypatch):
     original = backend.model.generate
     monkeypatch.setattr(backend.model, "generate", lambda **k: calls.append(k) or original(**k))
     gens = backend.generate([X] * 3, GREEDY)
-    assert len(calls) == 1 and "num_return_sequences" not in calls[0] and len(gens) == 3 and gens[0].token_ids == gens[2].token_ids
+    assert len(calls) == 1 and calls[0]["input_ids"].shape[0] == 1 and len(gens) == 3 and gens[0].token_ids == gens[2].token_ids
 
 
 def test_generation_stops_at_eos_and_keeps_it(monkeypatch):

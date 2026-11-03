@@ -1,7 +1,7 @@
 """Run by test_dist.py under torchrun, on the fake backend with gloo."""
 import random
 import sys
-from dataclasses import replace
+from dataclasses import asdict, replace
 from pathlib import Path
 
 import torch
@@ -9,12 +9,14 @@ from conftest import CLASSES, make_clips, make_disjoint
 from test_sync import BASE, resolve
 
 from avrsi import dist
+from avrsi import train as train_module
 from avrsi.config import resolve_arm
+from avrsi.critic import actor_prompt
 from avrsi.models.base import Generation, Sampling
 from avrsi.models.fake import FakeBackend
 from avrsi.parse import Item
 from avrsi.perturb import build_planted, build_xm, split_sources
-from avrsi.sync import GuardSet
+from avrsi.sync import Guard, GuardScores, GuardSet, actor_outcome, evaluate_actor
 from avrsi.train import Samplings, grpo_update, train, xm_dev_scorer
 
 SIZES = {"train": 100, "guard": 1024, "dev": 512, "gate": 100, "test": 100}
@@ -55,6 +57,33 @@ def run_grads(comm, out):
     save_state(out, comm, backend, {"stats": stats})
 
 
+def guard_scores(comm):
+    """The guard on yes, no, yes, no items under a backend that always answers yes: rank 0's shard scores
+    1, rank 1's 0, and only the gathered outcome is 1/2. Returns the global and the rank-local results."""
+    guard_set = fixture()[3]
+    yes, no = ([i for i in guard_set.items if i.answer == answer] for answer in ("yes", "no"))
+    guard_set = replace(guard_set, items=[x for pair in zip(yes, no) for x in pair])
+    scores = evaluate_actor(FakeBackend(CLASSES), guard_set, ARM, actor_prompt, SAMPLINGS.greedy, SAMPLINGS.critic, comm=comm)
+    guard = Guard(ARM)
+    guard.set_reference(GuardScores(0.5, 0.5))
+    local = actor_outcome(FakeBackend(CLASSES), guard_set.items[comm.rank::comm.world], actor_prompt, SAMPLINGS.greedy)[0]
+    return {"scores": asdict(scores), "decision": asdict(guard.decide(1, scores)), "local_outcome": local}
+
+
+def run_diverge(comm, out):
+    """Rank 1's parameters drift after each update; the first checkpoint must refuse to save them."""
+    update = train_module.grpo_update
+
+    def drifting(backend, *args, **kwargs):
+        stats = update(backend, *args, **kwargs)
+        if comm.rank == 1:
+            backend.policy.data[0, 0] += 1e-3
+        return stats
+
+    train_module.grpo_update = drifting
+    run_training(comm, out, 2, False)
+
+
 def run_real(comm, out, steps, resume):
     """A1 on the tiny real thinker and real PEFT, text only: adapters saved by rank 0, loaded by both."""
     from qwen3_tiny import BASE, tiny_thinker
@@ -80,6 +109,10 @@ if __name__ == "__main__":
     mode, out = sys.argv[1], sys.argv[2]
     if mode == "grads":
         run_grads(comm, out)
+    elif mode == "guard":
+        torch.save(guard_scores(comm), Path(out) / f"rank{comm.rank}.pt")
+    elif mode == "diverge":
+        run_diverge(comm, out)
     elif mode.startswith("real"):
         run_real(comm, out, int(sys.argv[4]), mode == "real_resume")
     else:

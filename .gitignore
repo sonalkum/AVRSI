@@ -3,7 +3,11 @@ __pycache__/
 .venv/
 *.key
 .env
-outputs/
+# outputs/slurm/ stays in the tree: Slurm opens --output before the job script can mkdir
+outputs/*
+!outputs/slurm/
+outputs/slurm/*
+!outputs/slurm/.gitkeep
 cache/
 data/raw/
 *.pt

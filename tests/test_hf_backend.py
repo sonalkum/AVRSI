@@ -10,6 +10,7 @@ from transformers.models.qwen3_omni_moe.processing_qwen3_omni_moe import Qwen3Om
 
 from avrsi.config import load_model
 from avrsi.models.base import ACTOR, CRITIC, REFERENCE, Generation, ModelInput, Sampling
+from avrsi.models import hf_common
 from avrsi.models.hf_common import HFBackend, media_kwargs, messages, model_dtype, processor_kwargs
 
 V = 6
@@ -165,6 +166,16 @@ def test_generate_sets_sampling_explicitly(backend):
     backend.generate([ModelInput("p")], GREEDY)
     greedy = backend.model.generations[-1]
     assert greedy["repetition_penalty"] == 1.0 and greedy["do_sample"] is False and "top_k" not in greedy
+
+
+@pytest.mark.parametrize("inputs,flag", [(ModelInput("p", video="c.mp4", audio="c.mp4"), True), (ModelInput("p", video="c.mp4"), False)])
+def test_generate_passes_the_sampling_and_the_flag(backend, inputs, flag, monkeypatch):
+    """Values off the generation_config defaults, so a dropped kwarg cannot match by accident."""
+    monkeypatch.setattr(hf_common, "processor_kwargs", lambda *a, **k: processor_kwargs(*a, **k, audio_loader=str))
+    monkeypatch.setattr(hf_common, "assert_withheld", lambda *a: None)  # the stub processor returns no media
+    backend.generate([inputs], Sampling(0.7, 0.9, True, 4, top_k=5))
+    sampled = backend.model.generations[-1]
+    assert (sampled.get("temperature"), sampled.get("top_p"), sampled.get("top_k"), sampled.get(FLAG)) == (0.7, 0.9, 5, flag)
 
 
 def test_bare_model_never_touches_adapters():

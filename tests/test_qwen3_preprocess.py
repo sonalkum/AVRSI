@@ -240,3 +240,45 @@ def test_subprocess_is_not_needed_for_decoding(clip, monkeypatch):
     read_video.cache_clear(), load_audio.cache_clear()
     monkeypatch.setattr(subprocess, "run", lambda *a, **k: pytest.fail("decoding shelled out"))
     assert len(read_video(clip)[0]) and len(load_audio(clip))
+
+
+def test_k_rollouts_see_the_prompt_that_is_scored(processor, clip, monkeypatch):
+    """generate's default expansion repeat_interleaves pixel_values_videos per patch, which scrambles the
+    frames of every rollout; tiled inputs give each of the K the first-step logits that scoring sees."""
+    backend = Tiny({"generate_batch": 4}, processor)
+    torch.manual_seed(0)
+    backend.attach_lora(4)
+    for param in backend.trainable_parameters():
+        param.data.add_(0.05)
+    inputs, logits, generate = [views(clip)[AV_PAIR]] * 4, [], backend.model.generate
+
+    def recorded(**kwargs):
+        out = generate(**kwargs, output_logits=True, return_dict_in_generate=True)
+        logits.append(out.logits[0].float())
+        return out.sequences
+
+    monkeypatch.setattr(backend.model, "generate", recorded)
+    gens = backend.generate(inputs, Sampling(1.0, 1.0, True, 2))
+    with torch.no_grad():
+        scored = backend.score_logprobs(inputs, gens, ACTOR)
+    first = torch.log_softmax(logits[0], -1)
+    assert torch.allclose(first, first[:1].expand_as(first), atol=1e-6)  # one prompt, so one first-step distribution
+    for row, g, s in zip(first, gens, scored):
+        assert float(row[g.token_ids[0]]) == pytest.approx(float(s[0]), abs=1e-4)  # scrambled frames move these by ~3e-3 to 1e-2
+
+
+@pytest.mark.parametrize("view,flag", [(AV_PAIR, True), (V_CHECK, False)])
+def test_the_flag_reaches_every_forward(backend, clip, view, flag, monkeypatch):
+    """Without use_audio_in_video the interleaved prompt gets the positions of separate streams."""
+    seen, forward = [], type(backend._base()).forward
+
+    def recorded(self, *args, **kwargs):
+        seen.append(kwargs.get(FLAG))
+        return forward(self, *args, **kwargs)
+
+    monkeypatch.setattr(type(backend._base()), "forward", recorded)
+    gen = backend.generate([views(clip)[view]], Sampling(0.0, 1.0, False, 2))[0]
+    generated = len(seen)
+    with torch.no_grad():
+        backend.score_logprobs([views(clip)[view]], [gen], ACTOR)
+    assert generated == 2 and len(seen) == 3 and seen == [flag] * 3

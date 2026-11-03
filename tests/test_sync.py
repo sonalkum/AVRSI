@@ -8,7 +8,7 @@ import random
 from avrsi.config import resolve_arm
 from avrsi.critic import A_CHECK, J_CHECK, V_CHECK, BackendExecutor, actor_prompt
 from avrsi.metrics import PlantedResult, gate0_criteria, gate0_report
-from avrsi.models.base import ACTOR, Generation, WithholdingError
+from avrsi.models.base import ACTOR, CRITIC, Generation, WithholdingError
 from avrsi.models.fake import FakeBackend
 from avrsi.parse import Item, jaccard, normalise_tokens
 from avrsi.perturb import AUDIO_STYLES, VISUAL_STYLES, build_planted
@@ -132,6 +132,13 @@ def test_condition_2_view_is_arm_specific(guard_set, samplings):
 
         planted_results(Spy(), guard_set.planted[:256:7], resolve_arm(arm_id).guard_view, resolve)
         assert set(seen) == wanted
+
+
+@pytest.mark.parametrize("arm_id,views", [("A8", {("audio",), ("video",)}), ("A15", {("audio", "video")})])
+def test_guard_checks_in_the_arms_view(arm_id, views, guard_set, samplings):
+    backend = FakeBackend(CLASSES)
+    evaluate_actor(backend, guard_set, resolve_arm(arm_id), actor_prompt, samplings.greedy, samplings.critic)
+    assert {x.modalities for _, x in backend.seen_inputs if x.prompt.startswith("You are checking")} == views
 
 
 def test_isolated_check_withholds_in_guard(guard_set, samplings):
@@ -349,6 +356,13 @@ def test_self_preference_prefers_own_valid_path(guard_set, samplings):
             return "A" if "Mine says" in inputs.prompt.split("Reasoning B:")[0] else "B"
 
     assert self_preference(OwnStyle(CLASSES), guard_set, samplings.greedy, samplings.critic, n=8) == 1.0
+
+
+def test_self_preference_generates_and_judges_as_the_critic(guard_set, samplings):
+    backend = FakeBackend(CLASSES)
+    self_preference(backend, guard_set, samplings.greedy, samplings.critic, n=8)
+    generated = [x for _, x in backend.seen_inputs if not x.prompt.startswith("Two reasoning")]
+    assert len(generated) == 8 and {role for role, _ in backend.seen_inputs} == {CRITIC}
 
 
 def test_t8_probes_catch_a_stream_that_never_arrives(guard_set, samplings):

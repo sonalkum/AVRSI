@@ -8,7 +8,7 @@ from pathlib import Path
 
 import pytest
 import torch
-from dist_worker import run_grads
+from dist_worker import guard_scores, run_grads
 
 from avrsi import dist
 
@@ -107,6 +107,20 @@ def test_summed_gradients_equal_one_process_on_the_whole_batch(tmp_path):
     assert two[0]["stats"]["loss"] == pytest.approx(one["stats"]["loss"]) and two[0]["stats"]["kl"] == pytest.approx(one["stats"]["kl"])
 
 
+def test_guard_scores_are_gathered_not_rank_local(tmp_path):
+    launch(tmp_path, "guard")
+    a, b = ranks(tmp_path)
+    whole = guard_scores(dist.LOCAL)
+    assert (a["local_outcome"], b["local_outcome"], whole["scores"]["outcome"]) == (1.0, 0.0, 0.5)
+    assert a["scores"] == b["scores"] == whole["scores"] and a["decision"] == b["decision"] == whole["decision"]
+
+
+def test_diverged_ranks_refuse_to_checkpoint(tmp_path):
+    with pytest.raises(AssertionError, match="ranks diverged"):
+        launch(tmp_path, "diverge")
+    assert not (tmp_path / "checkpoints" / "LATEST").exists()
+
+
 @pytest.mark.skipif(not (ROOT / ".venv" / "run_lib" / "peft").is_dir(), reason="peft absent")
 def test_real_thinker_trains_and_resumes_on_two_ranks(tmp_path):
     whole, broken = tmp_path / "whole", tmp_path / "broken"
@@ -125,3 +139,13 @@ def test_real_thinker_trains_and_resumes_on_two_ranks(tmp_path):
 
 def test_local_comm_is_inert():
     assert dist.LOCAL.is_main and dist.LOCAL.sum(3) == 3 and dist.LOCAL.gather_flat([1]) == [1]
+
+
+def test_setup_gives_each_rank_its_own_gpus(monkeypatch):
+    devices = []
+    monkeypatch.setattr(torch.cuda, "is_available", lambda: True)
+    monkeypatch.setattr(torch.cuda, "set_device", devices.append)
+    monkeypatch.setenv("LOCAL_RANK", "1")
+    monkeypatch.setenv("WORLD_SIZE", "1")
+    assert dist.setup(2) == (dist.LOCAL, "cuda:2", [2, 3]) and devices == [2]
+    assert dist.setup(1) == (dist.LOCAL, "cuda:1", None) and devices == [2, 1]

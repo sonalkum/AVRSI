@@ -223,7 +223,9 @@ class HFBackend(Backend):
 
     @torch.no_grad()
     def generate(self, inputs: Sequence[ModelInput], sampling: Sampling, role: str = ACTOR) -> list[Generation]:
-        """Runs of the same input (the K rollouts) share one call, up to generate_batch at a time."""
+        """Runs of the same input (the K rollouts) share one call, up to generate_batch at a time. The
+        inputs are tiled as for scoring: num_return_sequences would repeat_interleave the per-patch
+        tensors, which the thinker does not override, and scramble each rollout's frames."""
         outputs = []
         extra = self._generate_kwargs()
         stop = extra.get("eos_token_id", [])
@@ -231,9 +233,8 @@ class HFBackend(Backend):
             for x, n in _runs(inputs, self.generate_batch):
                 encoded, flag = self._encode(x)
                 sample = {"temperature": sampling.temperature, "top_p": sampling.top_p, "top_k": sampling.top_k} if sampling.do_sample else {}
-                if n > 1 and sampling.do_sample:
-                    sample["num_return_sequences"] = n
-                ids = self.model.generate(**encoded, **sample, **extra, do_sample=sampling.do_sample, repetition_penalty=sampling.repetition_penalty,
+                batch = {k: _repeat(v, n if sampling.do_sample else 1) for k, v in encoded.items()}
+                ids = self.model.generate(**batch, **sample, **extra, do_sample=sampling.do_sample, repetition_penalty=sampling.repetition_penalty,
                                           max_new_tokens=sampling.max_new_tokens, **{self.flag: flag})
                 rows = ids[:, encoded["input_ids"].shape[1]:].tolist()
                 for row in rows if sampling.do_sample else rows * n:  # greedy repeats are the same path
