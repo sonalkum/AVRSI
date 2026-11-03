@@ -7,7 +7,7 @@ overrides the body.
 
 ## Status
 
-**No real weights and no GPU yet.** The reward, critic, guard, GRPO, XM, metrics and statistics code is unit tested on a
+**One real-weights smoke run (2 steps of A8 on 2 RTX A6000s, docs/RUN_QWEN3.md "Measured"); no pilot yet.** The reward, critic, guard, GRPO, XM, metrics and statistics code is unit tested on a
 fake backend. Qwen3-Omni runs on the real thinker class (tiny random config), real PEFT and the real processor on a generated
 MP4, with training, resume and two-process runs tested on CPU; see [docs/RUN_QWEN3.md](docs/RUN_QWEN3.md), which also lists what
 only a GPU run can settle. The thinker needs 63.4 GB of GPU memory. The Qwen2.5-Omni and AVF wrappers remain unexecuted, and Phase 0

@@ -1,8 +1,8 @@
 # Running Qwen3-Omni: from zero to an A8 pilot
 
-Status 2026-11-02: everything below up to step 3 is tested on the real classes with tiny configs on CPU. **No
-real weights have run and no GPU has been used.** Steps 3 onward are written from the code and have not
-been run. "Unverified" is listed at the end.
+Status 2026-11-03: everything below up to step 3 is tested on the real classes with tiny configs on CPU, and the
+step-3 smoke has run on real Captioner weights on 2 RTX A6000s (job 8135955, one rank spanning both GPUs; numbers in
+"Measured" below). Steps 4 onward are written from the code and have not been run. "Unverified" is listed at the end.
 
 ## 0. Memory comes first
 
@@ -161,12 +161,25 @@ by PyAV and cached.
 `nn.Parameter`s, so PEFT cannot wrap them as modules. `lora_alpha` stays PEFT's default 8, scale 0.25; PLAN does not fix it, and it
 scales the effective learning rate, so decide it before the pilot.
 
+## Measured (smoke, job 8135955)
+
+Captioner weights, 2 x RTX A6000 (48 GB) as one rank, B=8, K=4, 128 actor / 64 critic tokens, 10 s clips at 20 frames
+(2,346-token AV prompt), forced format (67 of 80 rollouts replaced, so paths are short):
+
+- Load 347 s within `--mem=120G`. Weights split 26/28 decoder groups over the two GPUs, none on CPU.
+- Step 368 s and 367 s for 93 and 88 critic passes plus 8 x 4 rollouts and scoring: about 4 s per pass. Two steps, a guard
+  check, the handoff and a checkpoint fit in 23 min.
+- Peak 33.1 GiB allocated, 42.4 GiB reserved per GPU, including a 512-token worst-case scoring probe at `logprob_batch: 2`.
+- Rewards, KL, the guard (handoff at step 2), critic sync and checkpointing all ran; no check or pair parse failures.
+- The vision patch Conv3d took 51 s per clip in bf16 on these cards (torch 2.9.1, cuDNN 9.10), with or without cuDNN.
+  `linear_patch_embed` in `avrsi/models/qwen.py` replaces it with the same matmul (0.04 s). Before that a pass took ~51 s.
+
+At ~6 min per step one 2-GPU rank needs ~27 days for 6,400 steps, so the pilot needs more ranks or larger cards.
+
 ## Unverified until a GPU run
 
-- That real weights load this way on a GPU: time, host RAM during expert fusion, and whether `--mem=120G` is enough. Keys and
-  shapes match the checkpoint and fusion is tested on a tiny checkpoint in the hub layout.
-- All GPU memory numbers, including the ~72 GB estimate and `logprob_batch: 2`.
-- Step and guard time. The 1,792 guard passes per check and 112 critic passes per step are counts, not durations.
+- Host RAM during loading beyond the 120 GB job, on other cards.
+- Memory with Instruct's longer, unforced paths at 512 tokens per rollout.
 - NCCL. Tests use gloo on CPU. Bit-identical AdamW steps across GPUs are checked at run time, not proven.
 - A rank spanning GPUs: accelerate hooks with PEFT, checkpointing and the `lm_head` crop have run on one CPU device only. The map is
   computed on the meta device and fits.
